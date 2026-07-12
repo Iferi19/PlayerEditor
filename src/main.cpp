@@ -508,7 +508,8 @@ static void startAvgSpectrum(Doc& d)
     long long frames = d.clip.frameCount();
     std::thread([sas, gen, ch, frames, samples = std::move(samplesCopy)]()
     {
-        auto bins = Spec::averageSpectrumDb(samples, ch, frames, 4096);
+        // 平均は時間分解能が不要なので大きいFFTで低域の実解像度を稼ぐ(~2.7Hz)
+        auto bins = Spec::averageSpectrumDb(samples, ch, frames, 16384);
         std::lock_guard<std::mutex> lk(sas->m);
         sas->binsDb = std::move(bins);
         sas->gen = gen;
@@ -657,7 +658,8 @@ static void drawAnalysisPanel(App& a, ImVec2 size)
             // 曲全体平均: オレンジのライン
             if (!d->avgSpecBins.empty())
             {
-                auto avg = Spec::bandLevelsDb(d->avgSpecBins, d->clip.sampleRate, FFTN, nPts, 20.0f, 20000.0f);
+                int avgFftN = (int)d->avgSpecBins.size() * 2;   // 計算時のFFTサイズ
+                auto avg = Spec::bandLevelsDb(d->avgSpecBins, d->clip.sampleRate, avgFftN, nPts, 20.0f, 20000.0f);
                 std::vector<ImVec2> pts((size_t)nPts);
                 for (int i = 0; i < nPts; i++)
                 {
