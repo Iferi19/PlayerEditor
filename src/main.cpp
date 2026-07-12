@@ -13,6 +13,7 @@
 #include "ffmpeg.h"
 #include "effects.h"
 #include "analysis.h"
+#include "join.h"
 
 #include <algorithm>
 #include <cmath>
@@ -92,6 +93,11 @@ struct App
     float fxFadeIn = 0.0f;    // 秒
     float fxFadeOut = 0.0f;   // 秒
     bool fxReverse = false;
+
+    // タブ連結設定
+    bool wantJoin = false;
+    int joinOther = 0;          // 相手タブ(インデックス)
+    float joinXfadeSec = 2.0f;  // クロスフェード秒
 };
 
 static Doc* curDoc(App& a)
@@ -198,21 +204,49 @@ static void applyPlaybackGain(App& a)
     }
 }
 
+static std::string tempDir()
+{
+    const char* td = std::getenv("TEMP");
+    if (!td) td = std::getenv("TMP");
+#ifdef _WIN32
+    return td ? td : ".";
+#else
+    return td ? td : "/tmp";
+#endif
+}
+
+// 連結などで生まれたメモリ上のみのタブ(パス無し)は、一時WAVに書いてから測定する
+static std::string ensureMeasurablePath(Doc& d)
+{
+    if (!d.clip.path.empty()) return d.clip.path;
+    static int counter = 0;
+    std::string p = tempDir() + "/pe_measure_" + std::to_string(++counter) + ".wav";
+    std::string err;
+    if (!WavIo::writeFloatWav(p, d.clip.samples, d.clip.channels, d.clip.sampleRate,
+                              0, d.clip.frameCount(), 0.0, err))
+        return "";
+    return p;
+}
+
 static void startMeasure(Doc& d)
 {
     if (d.measuring) return;
     if (!Ffmpeg::available()) { d.loudText = "ffmpeg が見つかりません（winget等で導入してください）。"; return; }
+
+    std::string path = ensureMeasurablePath(d);
+    if (path.empty()) { d.loudText = "測定用の一時ファイル作成に失敗しました。"; return; }
+    bool isTemp = d.clip.path.empty();
 
     d.measuring = true;
     long long gen = ++d.measureGen;
     d.loudText = "測定中… (バックグラウンド)";
 
     auto ms = d.ms;
-    std::string path = d.clip.path;
-    std::thread([ms, path, gen]()
+    std::thread([ms, path, gen, isTemp]()
     {
         std::string err;
         LoudnessResult r = Ffmpeg::measure(path, err);
+        if (isTemp) std::remove(path.c_str());
         std::lock_guard<std::mutex> lk(ms->m);
         ms->result = r; ms->ok = r.ok; ms->gen = gen; ms->ready = true;
     }).detach();
@@ -243,8 +277,11 @@ static bool ensureMeasuredSync(Doc& d)
 {
     if (d.loudValid) return true;
     if (!Ffmpeg::available()) { d.loudText = "ffmpeg が見つかりません。"; return false; }
+    std::string path = ensureMeasurablePath(d);
+    if (path.empty()) { d.loudText = "測定用の一時ファイル作成に失敗しました。"; return false; }
     std::string err;
-    auto r = Ffmpeg::measure(d.clip.path, err);
+    auto r = Ffmpeg::measure(path, err);
+    if (d.clip.path.empty()) std::remove(path.c_str());
     if (!r.ok) { d.loudText = "測定失敗: " + err; return false; }
     d.loud = r; d.loudValid = true; showLoudness(d);
     return true;
@@ -310,6 +347,80 @@ static void doExport(App& a)
         d->loudText = buf;
     }
     else d->loudText = err;
+}
+
+static void playActive(App& a);   // 前方宣言(定義はタブ操作セクション)
+
+// 現在のタブ + 相手タブ を等パワークロスフェードで連結し、新しいタブを作る
+static void doJoin(App& a)
+{
+    Doc* d = curDoc(a);
+    if (!d) return;
+    if (a.joinOther < 0 || a.joinOther >= (int)a.docs.size() || a.joinOther == a.active)
+    { d->loudText = "連結する相手タブを選んでください。"; return; }
+
+    Doc& other = *a.docs[a.joinOther];
+    if (other.clip.channels != d->clip.channels)
+    { d->loudText = "チャンネル数が一致しません（現状は同一構成のみ連結可）。"; return; }
+    if (other.clip.sampleRate != d->clip.sampleRate)
+    { d->loudText = "サンプルレートが一致しません（現状は同一レートのみ連結可）。"; return; }
+
+    long long xf = (long long)((double)a.joinXfadeSec * d->clip.sampleRate);
+    auto joined = Join::crossfade(d->clip.samples, other.clip.samples, d->clip.channels, xf);
+
+    a.player.stop();
+    auto doc = std::make_unique<Doc>();
+    doc->clip.samples = std::move(joined);
+    doc->clip.channels = d->clip.channels;
+    doc->clip.sampleRate = d->clip.sampleRate;
+    doc->clip.path = "";   // メモリ上のみ(書き出しで保存)
+    std::string an = d->name, bn = other.name;
+    auto strip = [](std::string& s) { auto p = s.find_last_of('.'); if (p != std::string::npos) s = s.substr(0, p); };
+    strip(an); strip(bn);
+    doc->name = an + " + " + bn;
+    doc->tags = d->tags;   // タグは先頭側を引き継ぐ
+
+    a.docs.push_back(std::move(doc));
+    a.active = (int)a.docs.size() - 1;
+    a.pendingSelect = a.active;
+    if (a.normPlayback) startMeasure(*a.docs.back());
+    playActive(a);
+}
+
+static void drawJoinPopup(App& a)
+{
+    ImGui::SetNextWindowSize(ImVec2(460, 0), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("join", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+    Doc* d = curDoc(a);
+    if (!d || a.docs.size() < 2) { ImGui::CloseCurrentPopup(); ImGui::EndPopup(); return; }
+
+    ImGui::Text("「%s」の後ろに連結する:", d->name.c_str());
+
+    // 相手タブの選択(自分以外)
+    if (a.joinOther == a.active) a.joinOther = (a.active + 1) % (int)a.docs.size();
+    std::string preview = a.docs[a.joinOther]->name;
+    if (ImGui::BeginCombo("相手タブ", preview.c_str()))
+    {
+        for (int i = 0; i < (int)a.docs.size(); i++)
+        {
+            if (i == a.active) continue;
+            ImGui::PushID(i);
+            if (ImGui::Selectable(a.docs[i]->name.c_str(), i == a.joinOther)) a.joinOther = i;
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
+
+    ImGui::InputFloat("クロスフェード (秒)", &a.joinXfadeSec, 0.5f, 1.0f, "%.1f");
+    if (a.joinXfadeSec < 0) a.joinXfadeSec = 0;
+    ImGui::TextDisabled("※ 等パワークロスフェード。結果は新しいタブになります(書き出しで保存)。");
+
+    ImGui::Dummy(ImVec2(0, 6));
+    if (ImGui::Button("連結", ImVec2(120, 0))) { doJoin(a); ImGui::CloseCurrentPopup(); }
+    ImGui::SameLine();
+    if (ImGui::Button("キャンセル", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
 }
 
 // 解析レポートを保存(.json / .txt)。ラウドネスは可能なら測定して含める。
@@ -685,6 +796,10 @@ static void drawUI(App& a)
     ImGui::SameLine();
     if (ImGui::Button("加工…")) a.wantFx = true;
     ImGui::SameLine();
+    ImGui::BeginDisabled(a.docs.size() < 2);
+    if (ImGui::Button("連結…")) a.wantJoin = true;
+    ImGui::EndDisabled();
+    ImGui::SameLine();
     if (ImGui::Button("書き出し…")) a.wantExport = true;
     ImGui::SameLine();
     if (ImGui::Button("選択解除")) { if (d) d->selStart = d->selEnd = -1; }
@@ -751,6 +866,8 @@ static void drawUI(App& a)
     drawExportPopup(a);
     if (a.wantFx) { ImGui::OpenPopup("fx"); a.wantFx = false; }
     drawFxPopup(a);
+    if (a.wantJoin) { ImGui::OpenPopup("join"); a.wantJoin = false; }
+    drawJoinPopup(a);
 
     ImGui::End();
 }
