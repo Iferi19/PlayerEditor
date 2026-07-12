@@ -5,6 +5,7 @@
 #include "effects.h"
 #include "analysis.h"
 #include "join.h"
+#include "spectrum.h"
 
 #include <chrono>
 #include <cmath>
@@ -280,6 +281,41 @@ int main()
         // xf=0 (単純連結)
         auto J0 = Join::crossfade(A, B, ch, 0);
         check("join: xf=0 simple concat", (long long)J0.size() == (fa + fb) * ch, "");
+    }
+
+    // 11) スペクトラム (FFT精度)
+    {
+        // testtone = 440Hz, 振幅0.5(-6.02dBFS) ステレオ
+        const int FFTN = 4096;
+        int sr = clip.sampleRate;
+        auto mags = Spec::magnitudesDb(clip.samples, clip.channels, clip.frameCount(),
+                                       clip.frameCount() / 2, FFTN);
+
+        // ピークbinの周波数 ≈ 440Hz (分解能 sr/N ≈ 10.8Hz)
+        int argmax = 0;
+        for (int k = 1; k < (int)mags.size(); k++) if (mags[(size_t)k] > mags[(size_t)argmax]) argmax = k;
+        double peakHz = (double)argmax * sr / FFTN;
+        check("spec: peak bin ~440Hz", std::fabs(peakHz - 440.0) < 2.0 * sr / FFTN,
+              "peak=" + std::to_string(peakHz) + " Hz");
+
+        // ピークレベル ≈ -6dBFS (窓のスキャロッピングで最大-1.4dB落ちる)
+        check("spec: peak level ~ -6dBFS", mags[(size_t)argmax] > -8.5 && mags[(size_t)argmax] < -5.0,
+              "level=" + std::to_string(mags[(size_t)argmax]));
+
+        // 4.4kHz(10倍上)のbinは 30dB 以上低い
+        int farBin = (int)(4400.0 * FFTN / sr);
+        check("spec: 4.4kHz bin much lower", mags[(size_t)farBin] < mags[(size_t)argmax] - 30.0,
+              "far=" + std::to_string(mags[(size_t)farBin]));
+
+        // 帯域集計: 最大の帯域は 440Hz を含む帯域
+        const int NB = 30;
+        auto bands = Spec::bandLevelsDb(mags, sr, FFTN, NB, 20.0f, 20000.0f);
+        int bmax = 0;
+        for (int b = 1; b < NB; b++) if (bands[(size_t)b] > bands[(size_t)bmax]) bmax = b;
+        float f0 = 20.0f * std::pow(1000.0f, (float)bmax / NB);        // 20*(20000/20)^(b/NB)
+        float f1 = 20.0f * std::pow(1000.0f, (float)(bmax + 1) / NB);
+        check("spec: loudest band contains 440Hz", f0 <= 440.0f && 440.0f <= f1,
+              "band=" + std::to_string(f0) + "-" + std::to_string(f1) + " Hz");
     }
 
     std::printf("\n%s\n", g_fail == 0 ? "=> ALL PASS" : ("=> " + std::to_string(g_fail) + " FAILED").c_str());

@@ -14,6 +14,7 @@
 #include "effects.h"
 #include "analysis.h"
 #include "join.h"
+#include "spectrum.h"
 
 #include <algorithm>
 #include <cmath>
@@ -69,6 +70,7 @@ struct Doc
     // 解析パネル用キャッシュ(NaN=未計算。加工で無効化)
     double peakCache = NAN;
     double rmsCache = NAN;
+    std::vector<float> specDisp;   // スペクトラム表示の平滑化状態
 
     bool dragging = false;
     float downX = 0;
@@ -533,6 +535,67 @@ static void drawAnalysisPanel(App& a, ImVec2 size)
         std::snprintf(b, sizeof(b), "%.1f dBFS", d->rmsCache);
         row("RMS", b);
 
+        // ---- スペクトラム(再生位置に追従) ----
+        ImGui::Dummy(ImVec2(0, 4));
+        ImGui::TextDisabled("スペクトラム (再生位置)");
+        ImGui::Separator();
+        {
+            const int   NB = 30;         // 帯域数(対数間隔 20Hz-20kHz)
+            const int   FFTN = 4096;
+            const float FLOOR = -66.0f;  // 表示下限(dB)
+
+            float sw = size.x - 20.0f, sh = 150.0f;
+            ImVec2 sp0 = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("spec", ImVec2(sw, sh));
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImVec2 sp1(sp0.x + sw, sp0.y + sh);
+            dl->AddRectFilled(sp0, sp1, IM_COL32(14, 14, 16, 255));
+
+            // 現在の再生位置の帯域レベル
+            auto mags = Spec::magnitudesDb(d->clip.samples, d->clip.channels,
+                                           d->clip.frameCount(), d->playhead, FFTN);
+            auto bands = Spec::bandLevelsDb(mags, d->clip.sampleRate, FFTN, NB, 20.0f, 20000.0f);
+
+            if ((int)d->specDisp.size() != NB) d->specDisp.assign(NB, FLOOR);
+            for (int b = 0; b < NB; b++)
+            {
+                float t = std::max(bands[(size_t)b], FLOOR);
+                float& disp = d->specDisp[(size_t)b];
+                disp += (t - disp) * (t > disp ? 0.5f : 0.12f);   // アタック速め/リリース遅め
+            }
+
+            // dBグリッド(-20/-40)
+            for (float g : { -20.0f, -40.0f })
+            {
+                float gy = sp0.y + (g / FLOOR) * sh;
+                dl->AddLine(ImVec2(sp0.x, gy), ImVec2(sp1.x, gy), IM_COL32(50, 50, 55, 255));
+                char gb[8];
+                std::snprintf(gb, sizeof(gb), "%.0f", g);
+                dl->AddText(ImVec2(sp0.x + 2, gy - 14), IM_COL32(110, 110, 115, 255), gb);
+            }
+
+            // バー
+            float bw = sw / NB;
+            for (int b = 0; b < NB; b++)
+            {
+                float norm = std::clamp((d->specDisp[(size_t)b] - FLOOR) / -FLOOR, 0.0f, 1.0f);
+                float x0 = sp0.x + b * bw + 1;
+                float x1 = sp0.x + (b + 1) * bw - 1;
+                float y0 = sp1.y - norm * sh;
+                dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, sp1.y), IM_COL32(78, 201, 176, 230));
+            }
+
+            // 周波数目盛 (100 / 1k / 10k)
+            struct { float hz; const char* lb; } marks[] = { {100, "100"}, {1000, "1k"}, {10000, "10k"} };
+            for (auto& mk : marks)
+            {
+                float t = std::log(mk.hz / 20.0f) / std::log(20000.0f / 20.0f);
+                float mx = sp0.x + t * sw;
+                dl->AddLine(ImVec2(mx, sp1.y - 5), ImVec2(mx, sp1.y), IM_COL32(140, 140, 145, 255));
+                dl->AddText(ImVec2(mx - 8, sp1.y - 18), IM_COL32(140, 140, 145, 255), mk.lb);
+            }
+        }
+
         ImGui::Dummy(ImVec2(0, 10));
         if (ImGui::Button("ファイルに保存…", ImVec2(size.x - 20, 0))) doAnalysis(a);
         ImGui::EndGroup();
@@ -899,7 +962,7 @@ static void drawUI(App& a)
     const float statusH = 66.0f;
     ImVec2 avail = ImGui::GetContentRegionAvail();
     float waveH = std::max(120.0f, avail.y - statusH);
-    float panelW = (a.showAnalysis && d) ? 280.0f : 0.0f;
+    float panelW = (a.showAnalysis && d) ? 320.0f : 0.0f;
     if (d)
     {
         drawWaveform(a, *d, ImVec2(avail.x - panelW, waveH));
