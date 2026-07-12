@@ -2,6 +2,7 @@
 #include "player.h"
 #include "wav_io.h"
 #include "ffmpeg.h"
+#include "effects.h"
 
 #include <chrono>
 #include <cmath>
@@ -174,6 +175,47 @@ int main()
                   "ffprobe title=[" + o.substr(0, o.find_first_of("\r\n")) + "]");
         }
         std::remove(tmp.c_str());
+    }
+
+    // 8) エフェクト (純関数)
+    {
+        // gain: -6dB → ピークが -6dB 下がる
+        std::vector<float> buf = clip.samples;
+        Fx::gainDb(buf, clip.channels, 0, clip.frameCount(), -6.0);
+        float pk = 0; for (float v : buf) pk = std::max(pk, std::fabs(v));
+        double pkDb = 20.0 * std::log10(pk);
+        check("fx gain: -6dB", std::fabs(pkDb - (peak - 6.0)) < 0.1, "peak=" + std::to_string(pkDb));
+
+        // fadeIn: 先頭サンプルはほぼ0、フェード後は原音
+        buf = clip.samples;
+        long long fadeF = 4410;  // 0.1s
+        Fx::fadeIn(buf, clip.channels, 0, clip.frameCount(), fadeF);
+        float head = std::fabs(buf[0]);
+        // フェード後の区間は未変更のはず
+        bool tailSame = true;
+        for (long long f = fadeF; f < fadeF + 1000; f++)
+            for (int c = 0; c < clip.channels; c++)
+                if (buf[(size_t)(f * clip.channels + c)] != clip.samples[(size_t)(f * clip.channels + c)])
+                    { tailSame = false; break; }
+        check("fx fadeIn: head silent", head < 1e-4f, "head=" + std::to_string(head));
+        check("fx fadeIn: after fade untouched", tailSame, "");
+
+        // fadeOut: 末尾サンプルはほぼ0
+        buf = clip.samples;
+        Fx::fadeOut(buf, clip.channels, 0, clip.frameCount(), fadeF);
+        float tail = std::fabs(buf[buf.size() - 1]);
+        check("fx fadeOut: tail silent", tail < 1e-3f, "tail=" + std::to_string(tail));
+
+        // reverse: 2回反転で元に戻る
+        buf = clip.samples;
+        Fx::reverse(buf, clip.channels, 0, clip.frameCount());
+        bool changed = false;
+        for (size_t i = 0; i < 2000 && !changed; i++) if (buf[i] != clip.samples[i]) changed = true;
+        Fx::reverse(buf, clip.channels, 0, clip.frameCount());
+        bool restored = true;
+        for (size_t i = 0; i < buf.size(); i++) if (buf[i] != clip.samples[i]) { restored = false; break; }
+        check("fx reverse: changes data", changed, "");
+        check("fx reverse: double reverse restores", restored, "");
     }
 
     std::printf("\n%s\n", g_fail == 0 ? "=> ALL PASS" : ("=> " + std::to_string(g_fail) + " FAILED").c_str());

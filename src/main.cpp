@@ -11,6 +11,7 @@
 #include "player.h"
 #include "wav_io.h"
 #include "ffmpeg.h"
+#include "effects.h"
 
 #include <algorithm>
 #include <cmath>
@@ -82,6 +83,14 @@ struct App
     bool exportUseSelection = false;
     bool exportNormalize = false;
     bool wantExport = false;
+
+    // 加工(エフェクト)設定
+    bool wantFx = false;
+    bool fxUseSelection = false;
+    float fxGainDb = 0.0f;
+    float fxFadeIn = 0.0f;    // 秒
+    float fxFadeOut = 0.0f;   // 秒
+    bool fxReverse = false;
 };
 
 static Doc* curDoc(App& a)
@@ -300,6 +309,70 @@ static void doExport(App& a)
         d->loudText = buf;
     }
     else d->loudText = err;
+}
+
+static void applyFx(App& a)
+{
+    Doc* d = curDoc(a);
+    if (!d) return;
+
+    long long s = 0, e = d->clip.frameCount();
+    bool useSel = a.fxUseSelection && d->selStart >= 0 && d->selEnd > d->selStart;
+    if (useSel) { s = d->selStart; e = d->selEnd; }
+
+    a.player.stop();
+    int ch = d->clip.channels;
+    int sr = d->clip.sampleRate;
+
+    if (a.fxGainDb != 0.0f) Fx::gainDb(d->clip.samples, ch, s, e, a.fxGainDb);
+    if (a.fxFadeIn > 0.0f) Fx::fadeIn(d->clip.samples, ch, s, e, (long long)(a.fxFadeIn * sr));
+    if (a.fxFadeOut > 0.0f) Fx::fadeOut(d->clip.samples, ch, s, e, (long long)(a.fxFadeOut * sr));
+    if (a.fxReverse) Fx::reverse(d->clip.samples, ch, s, e);
+
+    d->pkWidth = -1;        // 波形を再計算
+    d->loudValid = false;   // ラウドネスは変わったので測り直し
+    char buf[256];
+    std::snprintf(buf, sizeof(buf), "加工を適用しました (%s%s%s%s%s) ※メモリ上のみ、書き出しで保存",
+        useSel ? "選択範囲" : "全体",
+        a.fxGainDb != 0.0f ? " / ゲイン" : "",
+        a.fxFadeIn > 0.0f ? " / フェードイン" : "",
+        a.fxFadeOut > 0.0f ? " / フェードアウト" : "",
+        a.fxReverse ? " / リバース" : "");
+    d->loudText = buf;
+}
+
+static void drawFxPopup(App& a)
+{
+    ImGui::SetNextWindowSize(ImVec2(430, 0), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("fx", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+    Doc* d = curDoc(a);
+    if (!d) { ImGui::CloseCurrentPopup(); ImGui::EndPopup(); return; }
+
+    bool hasSel = (d->selStart >= 0 && d->selEnd > d->selStart);
+    ImGui::TextUnformatted("対象:");
+    ImGui::SameLine();
+    if (ImGui::RadioButton("全体", !a.fxUseSelection)) a.fxUseSelection = false;
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!hasSel);
+    if (ImGui::RadioButton("選択範囲", a.fxUseSelection)) a.fxUseSelection = true;
+    ImGui::EndDisabled();
+    if (!hasSel) a.fxUseSelection = false;
+
+    ImGui::SeparatorText("エフェクト");
+    ImGui::SliderFloat("ゲイン (dB)", &a.fxGainDb, -24.0f, 24.0f, "%.1f dB");
+    ImGui::InputFloat("フェードイン (秒)", &a.fxFadeIn, 0.1f, 1.0f, "%.2f");
+    ImGui::InputFloat("フェードアウト (秒)", &a.fxFadeOut, 0.1f, 1.0f, "%.2f");
+    if (a.fxFadeIn < 0) a.fxFadeIn = 0;
+    if (a.fxFadeOut < 0) a.fxFadeOut = 0;
+    ImGui::Checkbox("リバース(逆再生化)", &a.fxReverse);
+    ImGui::TextDisabled("※ メモリ上のデータに適用します（元ファイルは変更されません）。");
+
+    ImGui::Dummy(ImVec2(0, 6));
+    if (ImGui::Button("適用", ImVec2(120, 0))) { applyFx(a); ImGui::CloseCurrentPopup(); }
+    ImGui::SameLine();
+    if (ImGui::Button("キャンセル", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
 }
 
 static void drawExportPopup(App& a)
@@ -570,6 +643,8 @@ static void drawUI(App& a)
     ImGui::SameLine();
     if (ImGui::Button("測定")) { if (d) { if (d->loudValid) showLoudness(*d); else startMeasure(*d); } }
     ImGui::SameLine();
+    if (ImGui::Button("加工…")) a.wantFx = true;
+    ImGui::SameLine();
     if (ImGui::Button("書き出し…")) a.wantExport = true;
     ImGui::SameLine();
     if (ImGui::Button("選択解除")) { if (d) d->selStart = d->selEnd = -1; }
@@ -631,9 +706,11 @@ static void drawUI(App& a)
     ImGui::EndChild();
     ImGui::PopStyleColor();
 
-    // ---- 書き出しダイアログ（モーダル）----
+    // ---- 書き出し/加工ダイアログ（モーダル）----
     if (a.wantExport) { ImGui::OpenPopup("export"); a.wantExport = false; }
     drawExportPopup(a);
+    if (a.wantFx) { ImGui::OpenPopup("fx"); a.wantFx = false; }
+    drawFxPopup(a);
 
     ImGui::End();
 }
