@@ -101,6 +101,7 @@ struct App
     float volumePct = 100.0f;   // 音量スライダー(0-100%)
     int pendingSelect = -1;     // プログラム起因のタブ選択(切替時に停止させない)
     bool showAnalysis = false;  // 解析サイドパネル表示
+    int monitorIdx = 0;         // モニターシミュレーション(kMonitors)
 
     // 書き出し設定
     int exportFmt = 0;              // kFormats のインデックス
@@ -331,6 +332,42 @@ struct ExportPreset
     int srIdx;        // kSrItems
     int bitIdx;       // kBitItems
 };
+// モニターシミュレーション(再生にのみ掛かる。書き出し・スペクトラムには影響しない)
+struct MonitorProfile
+{
+    const char* name;
+    bool mono;
+    std::vector<Bq::Spec> specs;
+};
+static const std::vector<MonitorProfile> kMonitors = {
+    { "フラット", false, {} },
+    { "スマホ(内蔵スピーカー)", true, {
+        { Bq::Type::Highpass, 500, 0.707f, 0 },
+        { Bq::Type::Highpass, 500, 0.707f, 0 },
+        { Bq::Type::Peaking, 2500, 2.0f, 4 },
+        { Bq::Type::Lowpass, 15000, 0.707f, 0 } } },
+    { "ノートPC", false, {
+        { Bq::Type::Highpass, 250, 0.707f, 0 },
+        { Bq::Type::Highpass, 250, 0.707f, 0 },
+        { Bq::Type::Peaking, 1500, 1.5f, 3 } } },
+    { "安いイヤホン", false, {
+        { Bq::Type::Highpass, 120, 0.707f, 0 },
+        { Bq::Type::Peaking, 300, 1.0f, -2 },
+        { Bq::Type::Peaking, 8000, 1.5f, 4 } } },
+    { "車内", false, {
+        { Bq::Type::LowShelf, 100, 0.9f, 6 },
+        { Bq::Type::Peaking, 1000, 1.0f, -2 },
+        { Bq::Type::Lowpass, 15000, 0.707f, 0 } } },
+    { "TV", false, {
+        { Bq::Type::Highpass, 120, 0.707f, 0 },
+        { Bq::Type::Peaking, 3000, 1.2f, 2 } } },
+    { "電話(通話帯域)", true, {
+        { Bq::Type::Highpass, 300, 0.707f, 0 },
+        { Bq::Type::Highpass, 300, 0.707f, 0 },
+        { Bq::Type::Lowpass, 3400, 0.707f, 0 },
+        { Bq::Type::Lowpass, 3400, 0.707f, 0 } } },
+};
+
 static const ExportPreset kPresets[] = {
     { "カスタム(手動設定)",                      -1, false,   0.0f, -1, -1 },
     { "スマホ/ストリーミング (-14 LUFS, AAC)",     2, true,  -14.0f,  1,  0 },
@@ -1096,6 +1133,22 @@ static void drawUI(App& a)
     if (ImGui::SliderFloat("##vol", &a.volumePct, 0.0f, 100.0f, "音量 %.0f%%"))
         applyPlaybackGain(a);
     ImGui::SameLine();
+    ImGui::SetNextItemWidth(150);
+    if (ImGui::BeginCombo("##monitor", kMonitors[(size_t)a.monitorIdx].name))
+    {
+        for (int i = 0; i < (int)kMonitors.size(); i++)
+        {
+            if (ImGui::Selectable(kMonitors[(size_t)i].name, i == a.monitorIdx))
+            {
+                a.monitorIdx = i;
+                a.player.setMonitor(kMonitors[(size_t)i].specs, kMonitors[(size_t)i].mono);
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("モニター: 再生音を各デバイスの聴こえ方でシミュレート\n(書き出し・解析には影響しません)");
+    ImGui::SameLine();
     if (ImGui::Checkbox("-14 LUFSで再生", &a.normPlayback))
     {
         if (a.normPlayback && d && !d->loudValid) startMeasure(*d);
@@ -1265,7 +1318,7 @@ int main(int argc, char** argv)
     if (!glfwInit()) return 1;
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    GLFWwindow* win = glfwCreateWindow(1060, 680, "PlayerEditor", nullptr, nullptr);
+    GLFWwindow* win = glfwCreateWindow(1230, 680, "PlayerEditor", nullptr, nullptr);
     if (!win) { glfwTerminate(); return 1; }
     glfwMakeContextCurrent(win);
     glfwSwapInterval(1);

@@ -1,7 +1,10 @@
 #pragma once
 #include <atomic>
 #include <cstdint>
+#include <mutex>
+#include <vector>
 #include "miniaudio.h"
+#include "biquad.h"
 
 struct AudioClip;
 
@@ -31,6 +34,9 @@ public:
     void setLoop(bool v) { loop_.store(v); }
     bool loop() const { return loop_.load(); }
 
+    // モニターシミュレーション(再生のみに掛かるフィルタ列。mono=モノラル合算)
+    void setMonitor(const std::vector<Bq::Spec>& specs, bool mono);
+
     State state() const { return state_; }
     bool isPlaying() const { return state_ == State::Playing; }
     bool isPaused() const { return state_ == State::Paused; }
@@ -39,6 +45,7 @@ public:
 private:
     static void dataCb(ma_device* d, void* out, const void* in, ma_uint32 count);
     void ensureDevice(int channels, int sampleRate);
+    void rebuildMonitorLocked();   // monM_ 保持中に呼ぶ
 
     ma_device device_{};
     bool deviceInit_ = false;
@@ -54,4 +61,10 @@ private:
     std::atomic<float> gain_{1.0f};
     std::atomic<bool> loop_{false};
     State state_ = State::Stopped;
+
+    // モニターチェーン(コールバックと共有、monM_ で保護)
+    std::mutex monM_;
+    std::vector<Bq::Spec> monSpecs_;
+    std::vector<Bq::Biquad> monFilters_;
+    bool monMono_ = false;
 };

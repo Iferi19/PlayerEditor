@@ -6,6 +6,7 @@
 #include "analysis.h"
 #include "join.h"
 #include "spectrum.h"
+#include "biquad.h"
 
 #include <chrono>
 #include <cmath>
@@ -362,6 +363,47 @@ int main()
             for (int i = 1; i < 200; i++) if (rs[(size_t)i] < rs[(size_t)(i - 1)] - 0.01f) { mono = false; break; }
             check("spec interp: monotonic on ramp", mono, "");
         }
+    }
+
+    // 12) バイクワッドフィルタ(モニターシミュレーション)
+    {
+        double sr = 44100;
+
+        // ハイパス500Hz: 通過帯域はフラット、低域は大きく減衰
+        auto hp = Bq::highpass(sr, 500, 0.707);
+        check("bq hp: flat at 2kHz", std::fabs(Bq::magnitudeDbAt(hp, 2000, sr)) < 0.5,
+              std::to_string(Bq::magnitudeDbAt(hp, 2000, sr)) + " dB");
+        check("bq hp: -25dB+ at 100Hz", Bq::magnitudeDbAt(hp, 100, sr) < -25.0,
+              std::to_string(Bq::magnitudeDbAt(hp, 100, sr)) + " dB");
+
+        // ピーキング +6dB@1kHz: 中心で+6、離れた帯域はフラット
+        auto pk = Bq::peaking(sr, 1000, 1.0, 6.0);
+        check("bq peak: +6dB at 1kHz", std::fabs(Bq::magnitudeDbAt(pk, 1000, sr) - 6.0) < 0.3,
+              std::to_string(Bq::magnitudeDbAt(pk, 1000, sr)) + " dB");
+        check("bq peak: flat at 50Hz", std::fabs(Bq::magnitudeDbAt(pk, 50, sr)) < 0.5,
+              std::to_string(Bq::magnitudeDbAt(pk, 50, sr)) + " dB");
+
+        // ローシェルフ +6dB@100Hz: 低域+6、高域フラット
+        auto ls = Bq::lowShelf(sr, 100, 0.9, 6.0);
+        check("bq shelf: +6dB at 20Hz", std::fabs(Bq::magnitudeDbAt(ls, 20, sr) - 6.0) < 1.0,
+              std::to_string(Bq::magnitudeDbAt(ls, 20, sr)) + " dB");
+        check("bq shelf: flat at 2kHz", std::fabs(Bq::magnitudeDbAt(ls, 2000, sr)) < 0.5,
+              std::to_string(Bq::magnitudeDbAt(ls, 2000, sr)) + " dB");
+
+        // 実信号処理: 440Hz正弦波をHP2kHzに通す → 理論減衰量と一致
+        auto hp2k = Bq::highpass(sr, 2000, 0.707);
+        double predicted = Bq::magnitudeDbAt(hp2k, 440, sr);
+        int n = 8820;   // 0.2s
+        float peakOut = 0;
+        for (int i = 0; i < n; i++)
+        {
+            float x = 0.5f * (float)std::sin(2 * 3.14159265358979 * 440 * i / sr);
+            float y = hp2k.process(x, 0);
+            if (i > 4410) peakOut = std::max(peakOut, std::fabs(y));   // 整定後
+        }
+        double measured = 20.0 * std::log10(peakOut / 0.5);
+        check("bq process: matches frequency response", std::fabs(measured - predicted) < 1.0,
+              "measured=" + std::to_string(measured) + " predicted=" + std::to_string(predicted));
     }
 
     std::printf("\n%s\n", g_fail == 0 ? "=> ALL PASS" : ("=> " + std::to_string(g_fail) + " FAILED").c_str());
