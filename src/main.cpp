@@ -12,6 +12,7 @@
 #include "wav_io.h"
 #include "ffmpeg.h"
 #include "effects.h"
+#include "analysis.h"
 
 #include <algorithm>
 #include <cmath>
@@ -309,6 +310,43 @@ static void doExport(App& a)
         d->loudText = buf;
     }
     else d->loudText = err;
+}
+
+// 解析レポートを保存(.json / .txt)。ラウドネスは可能なら測定して含める。
+static void doAnalysis(App& a)
+{
+    Doc* d = curDoc(a);
+    if (!d) return;
+
+    if (!d->loudValid && Ffmpeg::available()) ensureMeasuredSync(*d);
+
+    Analysis::Data ad;
+    ad.file = d->name;
+    ad.durationSec = d->clip.duration();
+    ad.sampleRate = d->clip.sampleRate;
+    ad.channels = d->clip.channels;
+    ad.frames = d->clip.frameCount();
+    ad.samplePeakDbfs = d->clip.samplePeakDb();
+    ad.rmsDbfs = d->clip.rmsDb();
+    if (d->loudValid)
+    {
+        ad.integratedLufs = d->loud.integratedLufs;
+        ad.truePeakDbtp = d->loud.truePeakDb;
+        ad.lraLu = d->loud.loudnessRange;
+    }
+
+    std::string nm = d->name;
+    auto dot = nm.find_last_of('.');
+    if (dot != std::string::npos) nm = nm.substr(0, dot);
+    auto out = pfd::save_file("解析結果を保存", nm + "_analysis.json",
+        { "JSON", "*.json", "テキスト", "*.txt" }).result();
+    if (out.empty()) return;
+
+    bool asText = out.size() > 4 && out.substr(out.size() - 4) == ".txt";
+    std::ofstream f(out, std::ios::binary);
+    if (!f) { d->loudText = "解析結果の保存に失敗しました。"; return; }
+    f << (asText ? Analysis::toText(ad) : Analysis::toJson(ad));
+    d->loudText = "解析結果を保存しました: " + baseName(out);
 }
 
 static void applyFx(App& a)
@@ -642,6 +680,8 @@ static void drawUI(App& a)
     }
     ImGui::SameLine();
     if (ImGui::Button("測定")) { if (d) { if (d->loudValid) showLoudness(*d); else startMeasure(*d); } }
+    ImGui::SameLine();
+    if (ImGui::Button("解析…")) doAnalysis(a);
     ImGui::SameLine();
     if (ImGui::Button("加工…")) a.wantFx = true;
     ImGui::SameLine();

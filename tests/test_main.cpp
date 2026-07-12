@@ -3,6 +3,7 @@
 #include "wav_io.h"
 #include "ffmpeg.h"
 #include "effects.h"
+#include "analysis.h"
 
 #include <chrono>
 #include <cmath>
@@ -216,6 +217,39 @@ int main()
         for (size_t i = 0; i < buf.size(); i++) if (buf[i] != clip.samples[i]) { restored = false; break; }
         check("fx reverse: changes data", changed, "");
         check("fx reverse: double reverse restores", restored, "");
+    }
+
+    // 9) 解析: RMS と レポート生成
+    {
+        // -6.02dBFS の正弦波 → RMS はさらに -3.01dB ≈ -9.03dBFS
+        double rms = clip.rmsDb();
+        check("analysis: rms of -6dB sine ~ -9.03", std::fabs(rms - (-9.03)) < 0.1,
+              "rms=" + std::to_string(rms));
+
+        Analysis::Data ad;
+        ad.file = "test\"quote.wav";   // エスケープ確認
+        ad.durationSec = clip.duration();
+        ad.sampleRate = clip.sampleRate;
+        ad.channels = clip.channels;
+        ad.frames = clip.frameCount();
+        ad.integratedLufs = -6.75;
+        ad.truePeakDbtp = -6.02;
+        ad.lraLu = 0.0;
+        ad.samplePeakDbfs = peak;
+        ad.rmsDbfs = rms;
+
+        std::string j = Analysis::toJson(ad);
+        check("analysis json: has integrated", j.find("\"integrated_lufs\": -6.75") != std::string::npos, "");
+        check("analysis json: gain to -14", j.find("\"gain_to_minus14_lufs_db\": -7.25") != std::string::npos, "");
+        check("analysis json: escaped quote", j.find("test\\\"quote.wav") != std::string::npos, "");
+
+        Analysis::Data nod;   // 未測定(NaN) → null になるか
+        nod.file = "x.wav";
+        std::string j2 = Analysis::toJson(nod);
+        check("analysis json: unmeasured -> null", j2.find("\"integrated_lufs\": null") != std::string::npos, "");
+
+        std::string t = Analysis::toText(ad);
+        check("analysis text: has LUFS line", t.find("-6.8 LUFS") != std::string::npos || t.find("-6.7 LUFS") != std::string::npos, "");
     }
 
     std::printf("\n%s\n", g_fail == 0 ? "=> ALL PASS" : ("=> " + std::to_string(g_fail) + " FAILED").c_str());
