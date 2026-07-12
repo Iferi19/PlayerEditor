@@ -14,7 +14,12 @@ void Player::dataCb(ma_device* d, void* out, const void* /*in*/, ma_uint32 count
     uint64_t pos = p->pos_.load();
     float g = p->gain_.load();
 
+    // モニターチェーンはUIスレッドから差し替わるため保護(切替時のみ競合)
+    std::lock_guard<std::mutex> lk(p->monM_);
+    bool hasMon = !p->monFilters_.empty() || p->monMono_;
+
     bool loop = p->loop_.load();
+    float fr[Bq::kMaxCh];
     for (ma_uint32 i = 0; i < count; i++)
     {
         if (p->samples_ && pos >= p->end_ && loop)
@@ -23,7 +28,24 @@ void Player::dataCb(ma_device* d, void* out, const void* /*in*/, ma_uint32 count
         if (p->samples_ && pos < p->end_)
         {
             const float* src = p->samples_ + pos * ch;
-            for (int c = 0; c < ch; c++) *o++ = src[c] * g;
+            if (hasMon && ch <= Bq::kMaxCh)
+            {
+                for (int c = 0; c < ch; c++) fr[c] = src[c];
+                for (auto& f : p->monFilters_)
+                    for (int c = 0; c < ch; c++) fr[c] = f.process(fr[c], c);
+                if (p->monMono_ && ch > 1)
+                {
+                    float m = 0;
+                    for (int c = 0; c < ch; c++) m += fr[c];
+                    m /= ch;
+                    for (int c = 0; c < ch; c++) fr[c] = m;
+                }
+                for (int c = 0; c < ch; c++) *o++ = fr[c] * g;
+            }
+            else
+            {
+                for (int c = 0; c < ch; c++) *o++ = src[c] * g;
+            }
             pos++;
         }
         else
@@ -33,6 +55,22 @@ void Player::dataCb(ma_device* d, void* out, const void* /*in*/, ma_uint32 count
         }
     }
     p->pos_.store(pos);
+}
+
+void Player::rebuildMonitorLocked()
+{
+    monFilters_.clear();
+    if (devSr_ <= 0) return;
+    for (const auto& s : monSpecs_)
+        monFilters_.push_back(Bq::make(s, devSr_));
+}
+
+void Player::setMonitor(const std::vector<Bq::Spec>& specs, bool mono)
+{
+    std::lock_guard<std::mutex> lk(monM_);
+    monSpecs_ = specs;
+    monMono_ = mono;
+    rebuildMonitorLocked();
 }
 
 void Player::ensureDevice(int channels, int sampleRate)
@@ -52,6 +90,8 @@ void Player::ensureDevice(int channels, int sampleRate)
         deviceInit_ = true;
         devCh_ = channels;
         devSr_ = sampleRate;
+        std::lock_guard<std::mutex> lk(monM_);
+        rebuildMonitorLocked();   // 新しいサンプルレートで係数を再計算
     }
 }
 
