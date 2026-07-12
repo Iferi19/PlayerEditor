@@ -1,0 +1,17 @@
+# Build output & fetched dependencies (GLFW / Dear ImGui / miniaudio / pfd)
+/build/
+/out/
+/.vs/
+*.user
+
+# Runtime / logs
+run*.log
+*.log
+imgui.ini
+
+# ffmpeg source dump (not part of this project; runtime uses system/winget ffmpeg)
+/ffmpeg-8.1.2/
+
+# OS
+Thumbs.db
+.DS_Store
