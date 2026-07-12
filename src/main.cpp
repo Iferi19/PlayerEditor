@@ -44,6 +44,15 @@ struct MeasureState
     bool ok = false;
 };
 
+// 曲全体平均スペクトラムの受け渡し(同上)
+struct SpecAvgState
+{
+    std::mutex m;
+    bool ready = false;
+    long long gen = 0;
+    std::vector<float> binsDb;
+};
+
 // 1タブ = 1ファイル分の状態
 struct Doc
 {
@@ -70,7 +79,13 @@ struct Doc
     // 解析パネル用キャッシュ(NaN=未計算。加工で無効化)
     double peakCache = NAN;
     double rmsCache = NAN;
-    std::vector<float> specDisp;   // スペクトラム表示の平滑化状態
+    std::vector<float> specDisp;   // スペクトラム表示の平滑化状態(ピクセル単位)
+
+    // 曲全体の平均スペクトラム(バックグラウンド計算)
+    std::shared_ptr<SpecAvgState> sas = std::make_shared<SpecAvgState>();
+    long long specAvgGen = 0;
+    bool specAvgComputing = false;
+    std::vector<float> avgSpecBins;   // 計算結果(binごとのdB)。空=未計算
 
     bool dragging = false;
     float downX = 0;
@@ -480,6 +495,43 @@ static void doAnalysis(App& a)
     d->loudText = "解析結果を保存しました: " + baseName(out);
 }
 
+// 曲全体の平均スペクトラムをバックグラウンドで計算(サンプルはコピーして渡す)
+static void startAvgSpectrum(Doc& d)
+{
+    if (d.specAvgComputing || !d.avgSpecBins.empty()) return;
+    d.specAvgComputing = true;
+    long long gen = ++d.specAvgGen;
+
+    auto sas = d.sas;
+    std::vector<float> samplesCopy = d.clip.samples;   // タブが閉じられても安全なようコピー
+    int ch = d.clip.channels;
+    long long frames = d.clip.frameCount();
+    std::thread([sas, gen, ch, frames, samples = std::move(samplesCopy)]()
+    {
+        auto bins = Spec::averageSpectrumDb(samples, ch, frames, 4096);
+        std::lock_guard<std::mutex> lk(sas->m);
+        sas->binsDb = std::move(bins);
+        sas->gen = gen;
+        sas->ready = true;
+    }).detach();
+}
+
+static void pollAvgSpectrum(Doc& d)
+{
+    std::vector<float> bins;
+    long long gen = 0;
+    {
+        std::lock_guard<std::mutex> lk(d.sas->m);
+        if (!d.sas->ready) return;
+        bins = std::move(d.sas->binsDb);
+        gen = d.sas->gen;
+        d.sas->ready = false;
+    }
+    if (gen != d.specAvgGen) return;   // 古い結果は破棄
+    d.avgSpecBins = std::move(bins);
+    d.specAvgComputing = false;
+}
+
 // 解析サイドパネル(右側)。値はライブ表示、保存はここから。
 static void drawAnalysisPanel(App& a, ImVec2 size)
 {
@@ -535,12 +587,15 @@ static void drawAnalysisPanel(App& a, ImVec2 size)
         std::snprintf(b, sizeof(b), "%.1f dBFS", d->rmsCache);
         row("RMS", b);
 
-        // ---- スペクトラム(再生位置に追従) ----
+        // ---- スペクトラム(連続曲線: 現在位置 + 曲全体平均) ----
         ImGui::Dummy(ImVec2(0, 4));
-        ImGui::TextDisabled("スペクトラム (再生位置)");
+        ImGui::TextDisabled("スペクトラム");
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.31f, 0.79f, 0.69f, 1.0f), "■現在");
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.30f, 1.0f), "―全体平均");
         ImGui::Separator();
         {
-            const int   NB = 30;         // 帯域数(対数間隔 20Hz-20kHz)
             const int   FFTN = 4096;
             const float FLOOR = -66.0f;  // 表示下限(dB)
 
@@ -551,16 +606,22 @@ static void drawAnalysisPanel(App& a, ImVec2 size)
             ImVec2 sp1(sp0.x + sw, sp0.y + sh);
             dl->AddRectFilled(sp0, sp1, IM_COL32(14, 14, 16, 255));
 
-            // 現在の再生位置の帯域レベル
+            int nPts = std::max(32, (int)sw);   // 1px = 1点の連続曲線
+
+            // 全体平均: 必要なら計算開始、完了していれば取り込み
+            startAvgSpectrum(*d);
+            pollAvgSpectrum(*d);
+
+            // 現在位置のスペクトラム(ピクセル解像度で対数リサンプル)
             auto mags = Spec::magnitudesDb(d->clip.samples, d->clip.channels,
                                            d->clip.frameCount(), d->playhead, FFTN);
-            auto bands = Spec::bandLevelsDb(mags, d->clip.sampleRate, FFTN, NB, 20.0f, 20000.0f);
+            auto live = Spec::bandLevelsDb(mags, d->clip.sampleRate, FFTN, nPts, 20.0f, 20000.0f);
 
-            if ((int)d->specDisp.size() != NB) d->specDisp.assign(NB, FLOOR);
-            for (int b = 0; b < NB; b++)
+            if ((int)d->specDisp.size() != nPts) d->specDisp.assign((size_t)nPts, FLOOR);
+            for (int i = 0; i < nPts; i++)
             {
-                float t = std::max(bands[(size_t)b], FLOOR);
-                float& disp = d->specDisp[(size_t)b];
+                float t = std::max(live[(size_t)i], FLOOR);
+                float& disp = d->specDisp[(size_t)i];
                 disp += (t - disp) * (t > disp ? 0.5f : 0.12f);   // アタック速め/リリース遅め
             }
 
@@ -574,15 +635,41 @@ static void drawAnalysisPanel(App& a, ImVec2 size)
                 dl->AddText(ImVec2(sp0.x + 2, gy - 14), IM_COL32(110, 110, 115, 255), gb);
             }
 
-            // バー
-            float bw = sw / NB;
-            for (int b = 0; b < NB; b++)
+            // 現在位置: 連続曲線(下を塗りつぶし)
+            for (int i = 0; i < nPts; i++)
             {
-                float norm = std::clamp((d->specDisp[(size_t)b] - FLOOR) / -FLOOR, 0.0f, 1.0f);
-                float x0 = sp0.x + b * bw + 1;
-                float x1 = sp0.x + (b + 1) * bw - 1;
-                float y0 = sp1.y - norm * sh;
-                dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, sp1.y), IM_COL32(78, 201, 176, 230));
+                float norm = std::clamp((d->specDisp[(size_t)i] - FLOOR) / -FLOOR, 0.0f, 1.0f);
+                float x = sp0.x + (float)i * sw / nPts;
+                float y = sp1.y - norm * sh;
+                dl->AddLine(ImVec2(x, y), ImVec2(x, sp1.y), IM_COL32(78, 201, 176, 110));
+            }
+            // 輪郭線
+            {
+                std::vector<ImVec2> pts((size_t)nPts);
+                for (int i = 0; i < nPts; i++)
+                {
+                    float norm = std::clamp((d->specDisp[(size_t)i] - FLOOR) / -FLOOR, 0.0f, 1.0f);
+                    pts[(size_t)i] = ImVec2(sp0.x + (float)i * sw / nPts, sp1.y - norm * sh);
+                }
+                dl->AddPolyline(pts.data(), nPts, IM_COL32(78, 201, 176, 255), 0, 1.5f);
+            }
+
+            // 曲全体平均: オレンジのライン
+            if (!d->avgSpecBins.empty())
+            {
+                auto avg = Spec::bandLevelsDb(d->avgSpecBins, d->clip.sampleRate, FFTN, nPts, 20.0f, 20000.0f);
+                std::vector<ImVec2> pts((size_t)nPts);
+                for (int i = 0; i < nPts; i++)
+                {
+                    float norm = std::clamp((avg[(size_t)i] - FLOOR) / -FLOOR, 0.0f, 1.0f);
+                    pts[(size_t)i] = ImVec2(sp0.x + (float)i * sw / nPts, sp1.y - norm * sh);
+                }
+                dl->AddPolyline(pts.data(), nPts, IM_COL32(242, 166, 76, 255), 0, 1.5f);
+            }
+            else if (d->specAvgComputing)
+            {
+                dl->AddText(ImVec2(sp0.x + sw * 0.5f - 45, sp0.y + 4),
+                            IM_COL32(242, 166, 76, 200), "全体平均: 計算中…");
             }
 
             // 周波数目盛 (100 / 1k / 10k)
@@ -626,6 +713,9 @@ static void applyFx(App& a)
     d->pkWidth = -1;        // 波形を再計算
     d->loudValid = false;   // ラウドネスは変わったので測り直し
     d->peakCache = d->rmsCache = NAN;   // 解析パネルのキャッシュも無効化
+    d->avgSpecBins.clear();             // 平均スペクトラムも無効化(進行中の結果は世代で破棄)
+    d->specAvgGen++;
+    d->specAvgComputing = false;
     char buf[256];
     std::snprintf(buf, sizeof(buf), "加工を適用しました (%s%s%s%s%s) ※メモリ上のみ、書き出しで保存",
         useSel ? "選択範囲" : "全体",
