@@ -326,6 +326,22 @@ int main()
               "peak=" + std::to_string(aPeakHz) + " Hz");
         check("spec avg: level ~ -6dBFS", avg[(size_t)aMax] > -8.5 && avg[(size_t)aMax] < -5.0,
               "level=" + std::to_string(avg[(size_t)aMax]));
+
+        // 低域の補間: binごとに値が異なるランプを細かくリサンプルしても階段(連続同値)にならない
+        {
+            std::vector<float> ramp((size_t)(FFTN / 2));
+            for (int k = 0; k < FFTN / 2; k++) ramp[(size_t)k] = (float)k * 0.5f;  // bin=kで k/2 dB
+            // 20-200Hz (bin 1.9〜18.6 付近) を200点で: 補間が無いと大量の同値が並ぶ
+            auto rs = Spec::bandLevelsDb(ramp, sr, FFTN, 200, 20.0f, 200.0f);
+            int dup = 0;
+            for (int i = 1; i < 200; i++) if (rs[(size_t)i] == rs[(size_t)(i - 1)]) dup++;
+            check("spec interp: low band has no staircase", dup < 20,
+                  "duplicates=" + std::to_string(dup) + "/199");
+            // 単調増加(ランプなので)
+            bool mono = true;
+            for (int i = 1; i < 200; i++) if (rs[(size_t)i] < rs[(size_t)(i - 1)] - 0.01f) { mono = false; break; }
+            check("spec interp: monotonic on ramp", mono, "");
+        }
     }
 
     std::printf("\n%s\n", g_fail == 0 ? "=> ALL PASS" : ("=> " + std::to_string(g_fail) + " FAILED").c_str());

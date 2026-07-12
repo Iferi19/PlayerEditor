@@ -108,19 +108,37 @@ namespace Spec
         {
             float f0 = fMin * std::pow(fMax / fMin, (float)b / nBands);
             float f1 = fMin * std::pow(fMax / fMin, (float)(b + 1) / nBands);
-            int k0 = std::max(1, (int)std::floor(f0 * fftSize / sampleRate));
-            int k1 = std::max(k0 + 1, (int)std::ceil(f1 * fftSize / sampleRate));
-            k1 = std::min(k1, fftSize / 2);
-            if (k0 >= k1) continue;
+            double k0f = (double)f0 * fftSize / sampleRate;
+            double k1f = (double)f1 * fftSize / sampleRate;
 
-            double acc = 0.0;
-            for (int k = k0; k < k1; k++)
+            if (k1f - k0f >= 1.5)
             {
-                double lin = std::pow(10.0, magsDb[(size_t)k] / 20.0);
-                acc += lin * lin;
+                // 帯域が複数binを含む: パワー平均
+                int k0 = std::max(1, (int)std::floor(k0f));
+                int k1 = std::max(k0 + 1, (int)std::ceil(k1f));
+                k1 = std::min(k1, fftSize / 2);
+                if (k0 >= k1) continue;
+                double acc = 0.0;
+                for (int k = k0; k < k1; k++)
+                {
+                    double lin = std::pow(10.0, magsDb[(size_t)k] / 20.0);
+                    acc += lin * lin;
+                }
+                acc /= (k1 - k0);
+                out[(size_t)b] = (float)(10.0 * std::log10(std::max(acc, 1e-14)));
             }
-            acc /= (k1 - k0);
-            out[(size_t)b] = (float)(10.0 * std::log10(std::max(acc, 1e-14)));
+            else
+            {
+                // 帯域がbinより細かい(低域): 隣接binをパワー領域で線形補間して階段を除去
+                double kc = std::sqrt((double)f0 * f1) * fftSize / sampleRate;   // 帯域中心(幾何平均)
+                int k = (int)kc;
+                k = std::max(1, std::min(k, fftSize / 2 - 2));
+                double frac = std::clamp(kc - k, 0.0, 1.0);
+                double p0 = std::pow(10.0, magsDb[(size_t)k] / 10.0);
+                double p1 = std::pow(10.0, magsDb[(size_t)(k + 1)] / 10.0);
+                double p = p0 * (1.0 - frac) + p1 * frac;
+                out[(size_t)b] = (float)(10.0 * std::log10(std::max(p, 1e-14)));
+            }
         }
         return out;
     }
