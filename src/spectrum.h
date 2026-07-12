@@ -69,7 +69,35 @@ namespace Spec
         return out;
     }
 
+    // 曲全体の平均スペクトラム(Welch法・重なり無し、パワー平均)。binごとのdBを返す。
+    inline std::vector<float> averageSpectrumDb(const std::vector<float>& samples, int ch,
+                                                long long frames, int fftSize)
+    {
+        std::vector<double> acc((size_t)(fftSize / 2), 0.0);
+        int n = 0;
+        if (frames < fftSize)
+        {
+            auto m = magnitudesDb(samples, ch, frames, frames / 2, fftSize);
+            for (int k = 0; k < fftSize / 2; k++) acc[(size_t)k] += std::pow(10.0, m[(size_t)k] / 10.0);
+            n = 1;
+        }
+        else
+        {
+            for (long long start = 0; start + fftSize <= frames; start += fftSize)
+            {
+                auto m = magnitudesDb(samples, ch, frames, start + fftSize / 2, fftSize);
+                for (int k = 0; k < fftSize / 2; k++) acc[(size_t)k] += std::pow(10.0, m[(size_t)k] / 10.0);
+                n++;
+            }
+        }
+        std::vector<float> out((size_t)(fftSize / 2));
+        for (int k = 0; k < fftSize / 2; k++)
+            out[(size_t)k] = (float)(10.0 * std::log10(std::max(acc[(size_t)k] / n, 1e-14)));
+        return out;
+    }
+
     // binスペクトルを対数間隔の帯域にまとめる(帯域内はパワー平均、dBで返す)
+    // nBands を描画ピクセル数にすれば連続曲線用の対数リサンプルとしても使える。
     inline std::vector<float> bandLevelsDb(const std::vector<float>& magsDb, int sampleRate,
                                            int fftSize, int nBands, float fMin, float fMax)
     {

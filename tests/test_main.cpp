@@ -316,6 +316,16 @@ int main()
         float f1 = 20.0f * std::pow(1000.0f, (float)(bmax + 1) / NB);
         check("spec: loudest band contains 440Hz", f0 <= 440.0f && 440.0f <= f1,
               "band=" + std::to_string(f0) + "-" + std::to_string(f1) + " Hz");
+
+        // 曲全体の平均スペクトラム: 定常音なので瞬時値とほぼ同じはず
+        auto avg = Spec::averageSpectrumDb(clip.samples, clip.channels, clip.frameCount(), FFTN);
+        int aMax = 0;
+        for (int k = 1; k < (int)avg.size(); k++) if (avg[(size_t)k] > avg[(size_t)aMax]) aMax = k;
+        double aPeakHz = (double)aMax * sr / FFTN;
+        check("spec avg: peak ~440Hz", std::fabs(aPeakHz - 440.0) < 2.0 * sr / FFTN,
+              "peak=" + std::to_string(aPeakHz) + " Hz");
+        check("spec avg: level ~ -6dBFS", avg[(size_t)aMax] > -8.5 && avg[(size_t)aMax] < -5.0,
+              "level=" + std::to_string(avg[(size_t)aMax]));
     }
 
     std::printf("\n%s\n", g_fail == 0 ? "=> ALL PASS" : ("=> " + std::to_string(g_fail) + " FAILED").c_str());
