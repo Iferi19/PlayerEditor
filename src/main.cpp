@@ -66,6 +66,10 @@ struct Doc
 
     Tags tags;   // 書き出し時に埋め込む曲情報
 
+    // 解析パネル用キャッシュ(NaN=未計算。加工で無効化)
+    double peakCache = NAN;
+    double rmsCache = NAN;
+
     bool dragging = false;
     float downX = 0;
 };
@@ -79,6 +83,7 @@ struct App
     bool loop = false;
     float volumePct = 100.0f;   // 音量スライダー(0-100%)
     int pendingSelect = -1;     // プログラム起因のタブ選択(切替時に停止させない)
+    bool showAnalysis = false;  // 解析サイドパネル表示
 
     // 書き出し設定
     int exportFmt = 0;              // kFormats のインデックス
@@ -423,6 +428,33 @@ static void drawJoinPopup(App& a)
     ImGui::EndPopup();
 }
 
+// 解析パネル/保存で使うキャッシュを確保(ピーク/RMSは全走査なので一度だけ計算)
+static void ensureAnalysisCache(Doc& d)
+{
+    if (std::isnan(d.peakCache)) d.peakCache = d.clip.samplePeakDb();
+    if (std::isnan(d.rmsCache)) d.rmsCache = d.clip.rmsDb();
+}
+
+static Analysis::Data buildAnalysis(Doc& d)
+{
+    ensureAnalysisCache(d);
+    Analysis::Data ad;
+    ad.file = d.name;
+    ad.durationSec = d.clip.duration();
+    ad.sampleRate = d.clip.sampleRate;
+    ad.channels = d.clip.channels;
+    ad.frames = d.clip.frameCount();
+    ad.samplePeakDbfs = d.peakCache;
+    ad.rmsDbfs = d.rmsCache;
+    if (d.loudValid)
+    {
+        ad.integratedLufs = d.loud.integratedLufs;
+        ad.truePeakDbtp = d.loud.truePeakDb;
+        ad.lraLu = d.loud.loudnessRange;
+    }
+    return ad;
+}
+
 // 解析レポートを保存(.json / .txt)。ラウドネスは可能なら測定して含める。
 static void doAnalysis(App& a)
 {
@@ -430,21 +462,7 @@ static void doAnalysis(App& a)
     if (!d) return;
 
     if (!d->loudValid && Ffmpeg::available()) ensureMeasuredSync(*d);
-
-    Analysis::Data ad;
-    ad.file = d->name;
-    ad.durationSec = d->clip.duration();
-    ad.sampleRate = d->clip.sampleRate;
-    ad.channels = d->clip.channels;
-    ad.frames = d->clip.frameCount();
-    ad.samplePeakDbfs = d->clip.samplePeakDb();
-    ad.rmsDbfs = d->clip.rmsDb();
-    if (d->loudValid)
-    {
-        ad.integratedLufs = d->loud.integratedLufs;
-        ad.truePeakDbtp = d->loud.truePeakDb;
-        ad.lraLu = d->loud.loudnessRange;
-    }
+    Analysis::Data ad = buildAnalysis(*d);
 
     std::string nm = d->name;
     auto dot = nm.find_last_of('.');
@@ -458,6 +476,70 @@ static void doAnalysis(App& a)
     if (!f) { d->loudText = "解析結果の保存に失敗しました。"; return; }
     f << (asText ? Analysis::toText(ad) : Analysis::toJson(ad));
     d->loudText = "解析結果を保存しました: " + baseName(out);
+}
+
+// 解析サイドパネル(右側)。値はライブ表示、保存はここから。
+static void drawAnalysisPanel(App& a, ImVec2 size)
+{
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.13f, 0.15f, 1.0f));
+    ImGui::BeginChild("analysisPanel", size, ImGuiChildFlags_None);
+
+    Doc* d = curDoc(a);
+    if (d)
+    {
+        ensureAnalysisCache(*d);
+        // 未測定なら自動でバックグラウンド測定を開始
+        if (!d->loudValid && !d->measuring && Ffmpeg::available()) startMeasure(*d);
+
+        ImGui::SetCursorPos(ImVec2(10, 8));
+        ImGui::BeginGroup();
+        ImGui::TextColored(ImVec4(0.62f, 0.82f, 0.98f, 1.0f), "解析");
+        ImGui::Separator();
+
+        auto row = [](const char* label, const std::string& value) {
+            ImGui::TextDisabled("%s", label);
+            ImGui::SameLine(130);
+            ImGui::TextUnformatted(value.c_str());
+        };
+        char b[64];
+
+        std::snprintf(b, sizeof(b), "%.2f s", d->clip.duration());
+        row("長さ", b);
+        std::snprintf(b, sizeof(b), "%d Hz / %dch", d->clip.sampleRate, d->clip.channels);
+        row("フォーマット", b);
+
+        ImGui::Dummy(ImVec2(0, 4));
+        ImGui::TextDisabled("ラウドネス (EBU R128)");
+        ImGui::Separator();
+        if (d->loudValid)
+        {
+            std::snprintf(b, sizeof(b), "%.1f LUFS", d->loud.integratedLufs);
+            row("Integrated", b);
+            std::snprintf(b, sizeof(b), "%.1f dBTP", d->loud.truePeakDb);
+            row("True Peak", b);
+            std::snprintf(b, sizeof(b), "%.1f LU", d->loud.loudnessRange);
+            row("LRA", b);
+            std::snprintf(b, sizeof(b), "%+.1f dB", -14.0 - d->loud.integratedLufs);
+            row("-14までのGain", b);
+        }
+        else if (d->measuring) row("Integrated", "測定中…");
+        else row("Integrated", Ffmpeg::available() ? "-" : "(ffmpeg無し)");
+
+        ImGui::Dummy(ImVec2(0, 4));
+        ImGui::TextDisabled("レベル");
+        ImGui::Separator();
+        std::snprintf(b, sizeof(b), "%.1f dBFS", d->peakCache);
+        row("Sample Peak", b);
+        std::snprintf(b, sizeof(b), "%.1f dBFS", d->rmsCache);
+        row("RMS", b);
+
+        ImGui::Dummy(ImVec2(0, 10));
+        if (ImGui::Button("ファイルに保存…", ImVec2(size.x - 20, 0))) doAnalysis(a);
+        ImGui::EndGroup();
+    }
+
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
 }
 
 static void applyFx(App& a)
@@ -480,6 +562,7 @@ static void applyFx(App& a)
 
     d->pkWidth = -1;        // 波形を再計算
     d->loudValid = false;   // ラウドネスは変わったので測り直し
+    d->peakCache = d->rmsCache = NAN;   // 解析パネルのキャッシュも無効化
     char buf[256];
     std::snprintf(buf, sizeof(buf), "加工を適用しました (%s%s%s%s%s) ※メモリ上のみ、書き出しで保存",
         useSel ? "選択範囲" : "全体",
@@ -792,7 +875,7 @@ static void drawUI(App& a)
     ImGui::SameLine();
     if (ImGui::Button("測定")) { if (d) { if (d->loudValid) showLoudness(*d); else startMeasure(*d); } }
     ImGui::SameLine();
-    if (ImGui::Button("解析…")) doAnalysis(a);
+    ImGui::Checkbox("解析", &a.showAnalysis);
     ImGui::SameLine();
     if (ImGui::Button("加工…")) a.wantFx = true;
     ImGui::SameLine();
@@ -812,13 +895,19 @@ static void drawUI(App& a)
     drawTabs(a);
     d = curDoc(a);   // drawTabs でアクティブが変わり得る
 
-    // ---- 波形 ----
+    // ---- 波形 + 解析パネル ----
     const float statusH = 66.0f;
     ImVec2 avail = ImGui::GetContentRegionAvail();
     float waveH = std::max(120.0f, avail.y - statusH);
+    float panelW = (a.showAnalysis && d) ? 280.0f : 0.0f;
     if (d)
     {
-        drawWaveform(a, *d, ImVec2(avail.x, waveH));
+        drawWaveform(a, *d, ImVec2(avail.x - panelW, waveH));
+        if (panelW > 0)
+        {
+            ImGui::SameLine(0, 0);
+            drawAnalysisPanel(a, ImVec2(panelW, waveH));
+        }
     }
     else
     {
