@@ -293,7 +293,8 @@ namespace Ffmpeg
     }
 
     bool transcode(const std::string& inWav, const std::string& outPath,
-                   const std::string& fmt, const Tags& tags, std::string& err)
+                   const std::string& fmt, const Tags& tags, std::string& err,
+                   int outSampleRate, int bitDepth)
     {
         const std::string& ff = findFfmpeg();
         if (ff.empty()) { err = "ffmpeg が見つかりません。"; return false; }
@@ -301,13 +302,30 @@ namespace Ffmpeg
         std::vector<std::string> args = { "-y", "-hide_banner", "-loglevel", "error", "-i", inWav };
 
         std::vector<std::string> codec;
-        if (fmt == "wav") codec = { "-c:a", "pcm_s24le" };
-        else if (fmt == "aif" || fmt == "aiff") codec = { "-c:a", "pcm_s24be" };
+        if (fmt == "wav")
+        {
+            const char* c = (bitDepth == 16) ? "pcm_s16le" : (bitDepth == 32) ? "pcm_f32le" : "pcm_s24le";
+            codec = { "-c:a", c };
+        }
+        else if (fmt == "aif" || fmt == "aiff")
+        {
+            const char* c = (bitDepth == 16) ? "pcm_s16be" : "pcm_s24be";
+            codec = { "-c:a", c };
+        }
         else if (fmt == "mp3") codec = { "-c:a", "libmp3lame", "-b:a", "320k" };
         else if (fmt == "m4a") codec = { "-c:a", "aac", "-b:a", "256k" };
-        else if (fmt == "flac") codec = { "-c:a", "flac" };
+        else if (fmt == "flac")
+        {
+            codec = { "-c:a", "flac", "-sample_fmt", (bitDepth == 16) ? "s16" : "s32" };
+        }
         else if (fmt == "ogg") codec = { "-c:a", "libvorbis", "-q:a", "6" };
         for (auto& c : codec) args.push_back(c);
+
+        if (outSampleRate > 0)
+        {
+            args.push_back("-ar");
+            args.push_back(std::to_string(outSampleRate));
+        }
 
         auto addMeta = [&](const char* k, const std::string& v) {
             if (!v.empty()) { args.push_back("-metadata"); args.push_back(std::string(k) + "=" + v); }

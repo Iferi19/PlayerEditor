@@ -106,6 +106,10 @@ struct App
     int exportFmt = 0;              // kFormats のインデックス
     bool exportUseSelection = false;
     bool exportNormalize = false;
+    float exportTargetLufs = -14.0f;
+    int exportSrIdx = 0;            // 0=元のまま
+    int exportBitIdx = 0;           // 0=自動
+    int exportPreset = 0;           // 0=カスタム
     bool wantExport = false;
 
     // 加工(エフェクト)設定
@@ -312,6 +316,31 @@ static bool ensureMeasuredSync(Doc& d)
 static const char* kFormats[] = { "WAV", "MP3", "M4A", "FLAC", "OGG", "AIF" };
 static const char* kExts[]    = { "wav", "mp3", "m4a", "flac", "ogg", "aif" };
 
+static const char* kSrItems[]  = { "元のまま", "44100 Hz", "48000 Hz", "96000 Hz" };
+static const int   kSrValues[] = { 0, 44100, 48000, 96000 };
+static const char* kBitItems[]  = { "自動", "16 bit", "24 bit", "32 bit (float)" };
+static const int   kBitValues[] = { 0, 16, 24, 32 };
+
+// 媒体別プリセット(選択時に下のフィールドへ反映。以降は自由に編集可)
+struct ExportPreset
+{
+    const char* name;
+    int fmt;          // kFormats インデックス
+    bool normalize;
+    float target;     // LUFS
+    int srIdx;        // kSrItems
+    int bitIdx;       // kBitItems
+};
+static const ExportPreset kPresets[] = {
+    { "カスタム(手動設定)",                      -1, false,   0.0f, -1, -1 },
+    { "スマホ/ストリーミング (-14 LUFS, AAC)",     2, true,  -14.0f,  1,  0 },
+    { "YouTube (-14 LUFS, 48kHz AAC)",             2, true,  -14.0f,  2,  0 },
+    { "Apple Music (-16 LUFS, AAC)",               2, true,  -16.0f,  1,  0 },
+    { "CDマスター (16bit/44.1kHz WAV)",            0, false,   0.0f,  1,  1 },
+    { "放送 EBU R128 (-23 LUFS, 24bit/48k WAV)",   0, true,  -23.0f,  2,  2 },
+    { "アーカイブ (FLAC 24bit, 元レート)",          3, false,   0.0f,  0,  2 },
+};
+
 static std::string tempWavPath()
 {
     const char* td = std::getenv("TEMP");
@@ -338,14 +367,16 @@ static void doExport(App& a)
     if (a.exportNormalize)
     {
         if (!ensureMeasuredSync(*d)) return;   // ffmpegで測定
-        gain = -14.0 - d->loud.integratedLufs;
+        gain = (double)a.exportTargetLufs - d->loud.integratedLufs;
     }
 
     const char* ext = kExts[a.exportFmt];
     std::string nm = d->name;
     auto dot = nm.find_last_of('.');
     if (dot != std::string::npos) nm = nm.substr(0, dot);
-    std::string suggested = nm + (a.exportNormalize ? "_-14LUFS" : "") + (useSel ? "_trim" : "") + "." + ext;
+    char sfx[32] = "";
+    if (a.exportNormalize) std::snprintf(sfx, sizeof(sfx), "_%.0fLUFS", a.exportTargetLufs);
+    std::string suggested = nm + sfx + (useSel ? "_trim" : "") + "." + ext;
 
     auto out = pfd::save_file("書き出し", suggested,
         { std::string(kFormats[a.exportFmt]) + " (*." + ext + ")", std::string("*.") + ext }).result();
@@ -357,15 +388,20 @@ static void doExport(App& a)
     if (!WavIo::writeFloatWav(tmp, d->clip.samples, d->clip.channels, d->clip.sampleRate, s, e, gain, err))
     { d->loudText = "書き出し失敗: " + err; return; }
 
-    bool ok = Ffmpeg::transcode(tmp, out, ext, d->tags, err);
+    bool ok = Ffmpeg::transcode(tmp, out, ext, d->tags, err,
+                                kSrValues[a.exportSrIdx], kBitValues[a.exportBitIdx]);
     std::remove(tmp.c_str());
 
     if (ok)
     {
+        char norm[32] = "";
+        if (a.exportNormalize) std::snprintf(norm, sizeof(norm), " / %.0f LUFS", a.exportTargetLufs);
         char buf[400];
-        std::snprintf(buf, sizeof(buf), "書き出し完了: %s  [%s%s%s]",
-            baseName(out).c_str(), kFormats[a.exportFmt],
-            a.exportNormalize ? " / -14 LUFS" : "", useSel ? " / 選択範囲" : "");
+        std::snprintf(buf, sizeof(buf), "書き出し完了: %s  [%s%s%s%s%s]",
+            baseName(out).c_str(), kFormats[a.exportFmt], norm,
+            useSel ? " / 選択範囲" : "",
+            a.exportSrIdx > 0 ? (std::string(" / ") + kSrItems[a.exportSrIdx]).c_str() : "",
+            a.exportBitIdx > 0 ? (std::string(" / ") + kBitItems[a.exportBitIdx]).c_str() : "");
         d->loudText = buf;
     }
     else d->loudText = err;
@@ -772,6 +808,32 @@ static void drawExportPopup(App& a)
 
     bool hasSel = (d->selStart >= 0 && d->selEnd > d->selStart);
 
+    // ---- 媒体別プリセット ----
+    {
+        auto names = [](int i) { return kPresets[i].name; };
+        if (ImGui::BeginCombo("プリセット", kPresets[a.exportPreset].name))
+        {
+            for (int i = 0; i < IM_ARRAYSIZE(kPresets); i++)
+            {
+                if (ImGui::Selectable(names(i), i == a.exportPreset))
+                {
+                    a.exportPreset = i;
+                    const auto& p = kPresets[i];
+                    if (p.fmt >= 0)   // カスタム以外は設定を反映
+                    {
+                        a.exportFmt = p.fmt;
+                        a.exportNormalize = p.normalize;
+                        if (p.normalize) a.exportTargetLufs = p.target;
+                        a.exportSrIdx = p.srIdx;
+                        a.exportBitIdx = p.bitIdx;
+                    }
+                }
+            }
+            ImGui::EndCombo();
+        }
+    }
+    ImGui::Separator();
+
     ImGui::TextUnformatted("範囲:");
     ImGui::SameLine();
     if (ImGui::RadioButton("全体", !a.exportUseSelection)) a.exportUseSelection = false;
@@ -781,8 +843,20 @@ static void drawExportPopup(App& a)
     ImGui::EndDisabled();
     if (!hasSel) a.exportUseSelection = false;
 
-    ImGui::Checkbox("-14 LUFS に正規化して書き出す", &a.exportNormalize);
+    ImGui::Checkbox("ラウドネス正規化", &a.exportNormalize);
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!a.exportNormalize);
+    ImGui::SetNextItemWidth(110);
+    ImGui::InputFloat("目標 LUFS", &a.exportTargetLufs, 1.0f, 2.0f, "%.1f");
+    if (a.exportTargetLufs > 0) a.exportTargetLufs = 0;
+    ImGui::EndDisabled();
+
     ImGui::Combo("形式", &a.exportFmt, kFormats, IM_ARRAYSIZE(kFormats));
+    ImGui::Combo("サンプルレート", &a.exportSrIdx, kSrItems, IM_ARRAYSIZE(kSrItems));
+    bool bitApplies = (a.exportFmt == 0 || a.exportFmt == 3 || a.exportFmt == 5);   // WAV/FLAC/AIF
+    ImGui::BeginDisabled(!bitApplies);
+    ImGui::Combo("ビット深度", &a.exportBitIdx, kBitItems, IM_ARRAYSIZE(kBitItems));
+    ImGui::EndDisabled();
 
     ImGui::SeparatorText("曲情報（タグ）");
     ImGui::InputText("タイトル", &d->tags.title);
