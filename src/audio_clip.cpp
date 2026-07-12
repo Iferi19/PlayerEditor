@@ -15,6 +15,16 @@ double AudioClip::samplePeakDb() const
     return 20.0 * std::log10((double)peak);
 }
 
+double AudioClip::rmsDb() const
+{
+    if (samples.empty()) return -INFINITY;
+    double acc = 0.0;
+    for (float v : samples) acc += (double)v * v;
+    double rms = std::sqrt(acc / samples.size());
+    if (rms <= 0.0) return -INFINITY;
+    return 20.0 * std::log10(rms);
+}
+
 bool AudioClip::load(const std::string& path, AudioClip& out, std::string& err)
 {
     // ネイティブのch/レートを維持(0指定)、フォーマットは f32
