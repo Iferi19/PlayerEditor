@@ -32,6 +32,8 @@ namespace Ffmpeg
 
     // float WAV(inWav) を fmt("wav"/"mp3"/"m4a"/"flac"/"ogg"/"aif") にエンコードし、
     // 対応形式なら tags を埋め込む。成功で true。
+    // outSampleRate: 0=維持 / それ以外=リサンプル。bitDepth: 0=形式の既定 / 16 / 24 / 32(wavのみfloat)。
     bool transcode(const std::string& inWav, const std::string& outPath,
-                   const std::string& fmt, const Tags& tags, std::string& err);
+                   const std::string& fmt, const Tags& tags, std::string& err,
+                   int outSampleRate = 0, int bitDepth = 0);
 }

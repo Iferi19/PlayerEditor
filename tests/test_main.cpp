@@ -155,6 +155,26 @@ int main()
                   ok ? ("size=" + std::to_string(sz)) : ("err=" + err));
         }
 
+        // プリセット系: サンプルレート変換 + ビット深度指定
+        {
+            std::string o48 = "D:/PlayerEditor/build/pe_out48.wav";
+            std::remove(o48.c_str());
+            bool ok = Ffmpeg::transcode(tmp, o48, "wav", Tags{}, err, 48000, 16);
+            AudioClip c48;
+            bool loaded = ok && AudioClip::load(o48, c48, err);
+            check("preset: wav 16bit/48k encodes", loaded, err);
+            if (loaded)
+            {
+                check("preset: sr converted to 48000", c48.sampleRate == 48000,
+                      "sr=" + std::to_string(c48.sampleRate));
+                check("preset: duration preserved ~3s", std::fabs(c48.duration() - 3.0) < 0.02,
+                      "dur=" + std::to_string(c48.duration()));
+                check("preset: peak preserved ~ -6dB", std::fabs(c48.samplePeakDb() - (-6.02)) < 0.3,
+                      "peak=" + std::to_string(c48.samplePeakDb()));
+            }
+            std::remove(o48.c_str());
+        }
+
         // readTags: 書き出したファイルからタグを読み戻す(入力タグの流用経路)
         {
             Tags rt = Ffmpeg::readTags("D:/PlayerEditor/build/pe_out.flac");
