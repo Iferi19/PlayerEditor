@@ -4,6 +4,7 @@
 #include "ffmpeg.h"
 #include "effects.h"
 #include "analysis.h"
+#include "join.h"
 
 #include <chrono>
 #include <cmath>
@@ -250,6 +251,35 @@ int main()
 
         std::string t = Analysis::toText(ad);
         check("analysis text: has LUFS line", t.find("-6.8 LUFS") != std::string::npos || t.find("-6.7 LUFS") != std::string::npos, "");
+    }
+
+    // 10) タブ連結 (等パワークロスフェード)
+    {
+        int ch = 2;
+        long long fa = 1000, fb = 1000, xf = 200;
+        std::vector<float> A((size_t)(fa * ch), 1.0f);
+        std::vector<float> B((size_t)(fb * ch), 1.0f);
+        auto J = Join::crossfade(A, B, ch, xf);
+
+        check("join: length = A+B-xf", (long long)J.size() == (fa + fb - xf) * ch,
+              "len=" + std::to_string(J.size() / ch) + " expect " + std::to_string(fa + fb - xf));
+        // 非フェード部は素通し(=1.0)
+        check("join: head untouched", std::fabs(J[0] - 1.0f) < 1e-6f, "");
+        check("join: tail untouched", std::fabs(J[J.size() - 1] - 1.0f) < 1e-6f, "");
+        // フェード中央: cos(45°)+sin(45°) = √2 ≈ 1.414 (等パワーの根拠)
+        long long midF = fa - xf + xf / 2;
+        float mid = J[(size_t)(midF * ch)];
+        check("join: equal-power center ~ 1.414", std::fabs(mid - 1.4142f) < 0.02f,
+              "mid=" + std::to_string(mid));
+        // フェード端: 始端=A側1.0, 終端=B側1.0
+        float xs = J[(size_t)((fa - xf) * ch)];
+        float xe = J[(size_t)((fa - 1) * ch)];
+        check("join: xfade start ~1.0", std::fabs(xs - 1.0f) < 0.02f, "start=" + std::to_string(xs));
+        check("join: xfade end ~1.0", std::fabs(xe - 1.0f) < 0.02f, "end=" + std::to_string(xe));
+
+        // xf=0 (単純連結)
+        auto J0 = Join::crossfade(A, B, ch, 0);
+        check("join: xf=0 simple concat", (long long)J0.size() == (fa + fb) * ch, "");
     }
 
     std::printf("\n%s\n", g_fail == 0 ? "=> ALL PASS" : ("=> " + std::to_string(g_fail) + " FAILED").c_str());
