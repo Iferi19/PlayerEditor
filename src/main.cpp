@@ -2,6 +2,7 @@
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
+#include "misc/cpp/imgui_stdlib.h"
 #include <GLFW/glfw3.h>
 
 #include "portable-file-dialogs.h"
@@ -60,6 +61,8 @@ struct Doc
     long long measureGen = 0;
     bool measuring = false;
 
+    Tags tags;   // 書き出し時に埋め込む曲情報
+
     bool dragging = false;
     float downX = 0;
 };
@@ -71,6 +74,12 @@ struct App
     Player player;
     bool normPlayback = true;   // 再生を -14 LUFS に（デフォルトON）
     bool loop = false;
+
+    // 書き出し設定
+    int exportFmt = 0;              // kFormats のインデックス
+    bool exportUseSelection = false;
+    bool exportNormalize = false;
+    bool wantExport = false;
 };
 
 static Doc* curDoc(App& a)
@@ -228,48 +237,105 @@ static bool ensureMeasuredSync(Doc& d)
     return true;
 }
 
-static void doNormalize(App& a)
+static const char* kFormats[] = { "WAV", "MP3", "M4A", "FLAC", "OGG", "AIF" };
+static const char* kExts[]    = { "wav", "mp3", "m4a", "flac", "ogg", "aif" };
+
+static std::string tempWavPath()
 {
-    Doc* d = curDoc(a);
-    if (!d || !ensureMeasuredSync(*d)) return;
-    double gain = -14.0 - d->loud.integratedLufs;
-    auto out = pfd::save_file("正規化して書き出し", suggestName(*d, "_-14LUFS"), { "WAV", "*.wav" }).result();
-    if (out.empty()) return;
-
-    std::string err;
-    if (!WavIo::writeFloatWav(out, d->clip.samples, d->clip.channels, d->clip.sampleRate,
-                              0, d->clip.frameCount(), gain, err))
-    { d->loudText = "書き出し失敗: " + err; return; }
-
-    auto check = Ffmpeg::measure(out, err);
-    char buf[512];
-    if (check.ok)
-        std::snprintf(buf, sizeof(buf), "書き出し完了 (Gain %+.1f dB / 適用後 %.1f LUFS, TP %.1f dBTP)",
-                      gain, check.integratedLufs, check.truePeakDb);
-    else
-        std::snprintf(buf, sizeof(buf), "書き出し完了 (Gain %+.1f dB)", gain);
-    d->loudText = buf;
+    const char* td = std::getenv("TEMP");
+    if (!td) td = std::getenv("TMP");
+#ifdef _WIN32
+    std::string dir = td ? td : ".";
+    return dir + "\\pe_export_tmp.wav";
+#else
+    std::string dir = td ? td : "/tmp";
+    return dir + "/pe_export_tmp.wav";
+#endif
 }
 
-static void doTrim(App& a)
+static void doExport(App& a)
 {
     Doc* d = curDoc(a);
     if (!d) return;
-    if (!(d->selStart >= 0 && d->selEnd > d->selStart))
-    { d->loudText = "波形上をドラッグして範囲を選択してください。"; return; }
 
-    auto out = pfd::save_file("選択範囲を書き出し", suggestName(*d, "_trim"), { "WAV", "*.wav" }).result();
+    long long s = 0, e = d->clip.frameCount();
+    bool useSel = a.exportUseSelection && d->selStart >= 0 && d->selEnd > d->selStart;
+    if (useSel) { s = d->selStart; e = d->selEnd; }
+
+    double gain = 0.0;
+    if (a.exportNormalize)
+    {
+        if (!ensureMeasuredSync(*d)) return;   // ffmpegで測定
+        gain = -14.0 - d->loud.integratedLufs;
+    }
+
+    const char* ext = kExts[a.exportFmt];
+    std::string nm = d->name;
+    auto dot = nm.find_last_of('.');
+    if (dot != std::string::npos) nm = nm.substr(0, dot);
+    std::string suggested = nm + (a.exportNormalize ? "_-14LUFS" : "") + (useSel ? "_trim" : "") + "." + ext;
+
+    auto out = pfd::save_file("書き出し", suggested,
+        { std::string(kFormats[a.exportFmt]) + " (*." + ext + ")", std::string("*.") + ext }).result();
     if (out.empty()) return;
 
+    // 一時的に float WAV を作り、ffmpeg で目的形式へエンコード（タグ埋め込み）
+    std::string tmp = tempWavPath();
     std::string err;
-    if (!WavIo::writeFloatWav(out, d->clip.samples, d->clip.channels, d->clip.sampleRate,
-                              d->selStart, d->selEnd, 0.0, err))
+    if (!WavIo::writeFloatWav(tmp, d->clip.samples, d->clip.channels, d->clip.sampleRate, s, e, gain, err))
     { d->loudText = "書き出し失敗: " + err; return; }
 
-    double dur = (d->selEnd - d->selStart) / (double)d->clip.sampleRate;
-    char buf[256];
-    std::snprintf(buf, sizeof(buf), "トリミング書き出し完了 (%.2f s)", dur);
-    d->loudText = buf;
+    bool ok = Ffmpeg::transcode(tmp, out, ext, d->tags, err);
+    std::remove(tmp.c_str());
+
+    if (ok)
+    {
+        char buf[400];
+        std::snprintf(buf, sizeof(buf), "書き出し完了: %s  [%s%s%s]",
+            baseName(out).c_str(), kFormats[a.exportFmt],
+            a.exportNormalize ? " / -14 LUFS" : "", useSel ? " / 選択範囲" : "");
+        d->loudText = buf;
+    }
+    else d->loudText = err;
+}
+
+static void drawExportPopup(App& a)
+{
+    ImGui::SetNextWindowSize(ImVec2(470, 0), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("export", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+    Doc* d = curDoc(a);
+    if (!d) { ImGui::CloseCurrentPopup(); ImGui::EndPopup(); return; }
+
+    bool hasSel = (d->selStart >= 0 && d->selEnd > d->selStart);
+
+    ImGui::TextUnformatted("範囲:");
+    ImGui::SameLine();
+    if (ImGui::RadioButton("全体", !a.exportUseSelection)) a.exportUseSelection = false;
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!hasSel);
+    if (ImGui::RadioButton("選択範囲", a.exportUseSelection)) a.exportUseSelection = true;
+    ImGui::EndDisabled();
+    if (!hasSel) a.exportUseSelection = false;
+
+    ImGui::Checkbox("-14 LUFS に正規化して書き出す", &a.exportNormalize);
+    ImGui::Combo("形式", &a.exportFmt, kFormats, IM_ARRAYSIZE(kFormats));
+
+    ImGui::SeparatorText("曲情報（タグ）");
+    ImGui::InputText("タイトル", &d->tags.title);
+    ImGui::InputText("アーティスト", &d->tags.artist);
+    ImGui::InputText("アルバム", &d->tags.album);
+    ImGui::InputText("アルバムアーティスト", &d->tags.albumArtist);
+    ImGui::InputText("ジャンル", &d->tags.genre);
+    ImGui::InputText("年", &d->tags.year);
+    ImGui::InputText("トラック番号", &d->tags.track);
+    ImGui::TextDisabled("※ 全形式に埋め込みます（AIF/WAV含む）。");
+
+    ImGui::Dummy(ImVec2(0, 6));
+    if (ImGui::Button("書き出す", ImVec2(130, 0))) { doExport(a); ImGui::CloseCurrentPopup(); }
+    ImGui::SameLine();
+    if (ImGui::Button("キャンセル", ImVec2(130, 0))) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
 }
 
 // --- タブ操作 / 再生 ---
@@ -475,9 +541,7 @@ static void drawUI(App& a)
     ImGui::SameLine();
     if (ImGui::Button("測定")) { if (d) { if (d->loudValid) showLoudness(*d); else startMeasure(*d); } }
     ImGui::SameLine();
-    if (ImGui::Button("正規化書き出し(-14)")) doNormalize(a);
-    ImGui::SameLine();
-    if (ImGui::Button("選択範囲を書き出し")) doTrim(a);
+    if (ImGui::Button("書き出し…")) a.wantExport = true;
     ImGui::SameLine();
     if (ImGui::Button("選択解除")) { if (d) d->selStart = d->selEnd = -1; }
     ImGui::EndDisabled();
@@ -537,6 +601,10 @@ static void drawUI(App& a)
     ImGui::EndGroup();
     ImGui::EndChild();
     ImGui::PopStyleColor();
+
+    // ---- 書き出しダイアログ（モーダル）----
+    if (a.wantExport) { ImGui::OpenPopup("export"); a.wantExport = false; }
+    drawExportPopup(a);
 
     ImGui::End();
 }

@@ -21,9 +21,18 @@ namespace
     }
 
 #ifdef _WIN32
+    // CreateProcess 用に引数を1つクォート（内部の " は \" に）。
+    std::wstring quoteW(const std::wstring& s)
+    {
+        std::wstring r = L"\"";
+        for (wchar_t c : s) { if (c == L'"') r += L"\\\""; else r += c; }
+        r += L"\"";
+        return r;
+    }
+
     // 子プロセスを「窓なし」で起動し、stdout+stderr をまとめて取得する。
-    // cmd.exe を介さないので一瞬のコンソール窓も出ない。
-    std::string runHiddenW(const std::wstring& cmdline)
+    // cmd.exe を介さないので一瞬のコンソール窓も出ない。exitCode に終了コードを返す(任意)。
+    std::string runHiddenW(const std::wstring& cmdline, DWORD* exitCode = nullptr)
     {
         std::string out;
         SECURITY_ATTRIBUTES sa{};
@@ -65,6 +74,7 @@ namespace
 
         CloseHandle(rd);
         WaitForSingleObject(pi.hProcess, INFINITE);
+        if (exitCode) { DWORD ec = 1; GetExitCodeProcess(pi.hProcess, &ec); *exitCode = ec; }
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
         if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
@@ -176,5 +186,53 @@ namespace Ffmpeg
         res.loudnessRange = lra;
         res.ok = true;
         return res;
+    }
+
+    bool transcode(const std::string& inWav, const std::string& outPath,
+                   const std::string& fmt, const Tags& tags, std::string& err)
+    {
+        const std::string& ff = findFfmpeg();
+        if (ff.empty()) { err = "ffmpeg が見つかりません。"; return false; }
+
+        std::vector<std::string> args = { "-y", "-hide_banner", "-loglevel", "error", "-i", inWav };
+
+        std::vector<std::string> codec;
+        if (fmt == "wav") codec = { "-c:a", "pcm_s24le" };
+        else if (fmt == "aif" || fmt == "aiff") codec = { "-c:a", "pcm_s24be" };
+        else if (fmt == "mp3") codec = { "-c:a", "libmp3lame", "-b:a", "320k" };
+        else if (fmt == "m4a") codec = { "-c:a", "aac", "-b:a", "256k" };
+        else if (fmt == "flac") codec = { "-c:a", "flac" };
+        else if (fmt == "ogg") codec = { "-c:a", "libvorbis", "-q:a", "6" };
+        for (auto& c : codec) args.push_back(c);
+
+        auto addMeta = [&](const char* k, const std::string& v) {
+            if (!v.empty()) { args.push_back("-metadata"); args.push_back(std::string(k) + "=" + v); }
+        };
+        addMeta("title", tags.title);
+        addMeta("artist", tags.artist);
+        addMeta("album", tags.album);
+        addMeta("album_artist", tags.albumArtist);
+        addMeta("genre", tags.genre);
+        addMeta("date", tags.year);
+        addMeta("track", tags.track);
+
+        args.push_back(outPath);
+
+#ifdef _WIN32
+        std::wstring cmd = quoteW(plat::utf8ToWide(ff));
+        for (auto& a : args) cmd += L" " + quoteW(plat::utf8ToWide(a));
+        DWORD ec = 1;
+        std::string log = runHiddenW(cmd, &ec);
+        if (ec != 0) { err = "エンコード失敗: " + (log.empty() ? std::string("ffmpeg error") : log.substr(0, 400)); return false; }
+        return true;
+#else
+        std::string cmd = "\"" + ff + "\"";
+        for (auto& a : args) cmd += " \"" + a + "\"";
+        cmd += " 2>&1";
+        std::string log = runCapture(cmd);
+        std::ifstream f(outPath);
+        if (!f.good()) { err = "エンコード失敗: " + log.substr(0, 400); return false; }
+        return true;
+#endif
     }
 }

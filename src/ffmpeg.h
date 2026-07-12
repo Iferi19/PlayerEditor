@@ -9,9 +9,25 @@ struct LoudnessResult
     bool ok = false;
 };
 
+// 楽曲情報（埋め込みメタデータ）
+struct Tags
+{
+    std::string title, artist, album, albumArtist, genre, year, track;
+    bool any() const
+    {
+        return !(title.empty() && artist.empty() && album.empty() && albumArtist.empty()
+                 && genre.empty() && year.empty() && track.empty());
+    }
+};
+
 namespace Ffmpeg
 {
     const std::string& findFfmpeg();   // 見つからなければ ""
     bool available();
     LoudnessResult measure(const std::string& input, std::string& err);
+
+    // float WAV(inWav) を fmt("wav"/"mp3"/"m4a"/"flac"/"ogg"/"aif") にエンコードし、
+    // 対応形式なら tags を埋め込む。成功で true。
+    bool transcode(const std::string& inWav, const std::string& outPath,
+                   const std::string& fmt, const Tags& tags, std::string& err);
 }

@@ -6,13 +6,14 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <fstream>
 #include <string>
 #include <thread>
 
 static int g_fail = 0;
-static void check(const char* name, bool ok, const std::string& detail)
+static void check(const std::string& name, bool ok, const std::string& detail)
 {
-    std::printf("[%s] %s  %s\n", ok ? "PASS" : "FAIL", name, detail.c_str());
+    std::printf("[%s] %s  %s\n", ok ? "PASS" : "FAIL", name.c_str(), detail.c_str());
     if (!ok) g_fail++;
 }
 
@@ -111,6 +112,46 @@ int main()
               "pos=" + std::to_string(pos) + " (region end=" + std::to_string(loopFrames) + ")");
         p.setLoop(false);
         p.stop();
+    }
+
+    // 7) 多形式書き出し + タグ埋め込み
+    if (Ffmpeg::available())
+    {
+        // まず float WAV を用意
+        std::string tmp = "D:/PlayerEditor/build/pe_test_src.wav";
+        WavIo::writeFloatWav(tmp, clip.samples, clip.channels, clip.sampleRate, 0, clip.frameCount(), 0.0, err);
+
+        Tags tags;
+        tags.title = "PE Test Title";
+        tags.artist = "PE Artist";
+        tags.album = "PE Album";
+
+        const char* exts[] = { "mp3", "flac", "aif", "ogg", "m4a", "wav" };
+        for (const char* ext : exts)
+        {
+            std::string out = std::string("D:/PlayerEditor/build/pe_out.") + ext;
+            std::remove(out.c_str());
+            bool ok = Ffmpeg::transcode(tmp, out, ext, tags, err);
+            std::ifstream f(out, std::ios::binary | std::ios::ate);
+            long long sz = f.good() ? (long long)f.tellg() : 0;
+            check(std::string("encode ") + ext, ok && sz > 0,
+                  ok ? ("size=" + std::to_string(sz)) : ("err=" + err));
+        }
+
+        // タグが実際に埋め込まれたか flac を ffprobe で確認
+        std::string ff = Ffmpeg::findFfmpeg();
+        std::string probe = ff.substr(0, ff.find_last_of("/\\") + 1) + "ffprobe.exe";
+        std::ifstream pf(probe);
+        if (pf.good())
+        {
+            std::string cmd = "\"\"" + probe + "\" -v quiet -show_entries format_tags=title -of default=nw=1 \"D:/PlayerEditor/build/pe_out.flac\"\"";
+            std::string o;
+            FILE* p = _popen(cmd.c_str(), "r");
+            if (p) { char b[256]; size_t n; while ((n = fread(b, 1, sizeof(b), p)) > 0) o.append(b, n); _pclose(p); }
+            check("flac tag embedded (title)", o.find("PE Test Title") != std::string::npos,
+                  "ffprobe title=[" + o.substr(0, o.find_first_of("\r\n")) + "]");
+        }
+        std::remove(tmp.c_str());
     }
 
     std::printf("\n%s\n", g_fail == 0 ? "=> ALL PASS" : ("=> " + std::to_string(g_fail) + " FAILED").c_str());
