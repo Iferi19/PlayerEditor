@@ -74,6 +74,8 @@ struct App
     Player player;
     bool normPlayback = true;   // 再生を -14 LUFS に（デフォルトON）
     bool loop = false;
+    float volumePct = 100.0f;   // 音量スライダー(0-100%)
+    int pendingSelect = -1;     // プログラム起因のタブ選択(切替時に停止させない)
 
     // 書き出し設定
     int exportFmt = 0;              // kFormats のインデックス
@@ -173,15 +175,16 @@ static void showLoudness(Doc& d)
 static void applyPlaybackGain(App& a)
 {
     Doc* d = curDoc(a);
+    float vol = a.volumePct / 100.0f;   // 音量スライダー(線形)
     if (a.normPlayback && d && d->loudValid)
     {
         d->playbackGainDb = -14.0 - d->loud.integratedLufs;
-        a.player.setGain((float)std::pow(10.0, d->playbackGainDb / 20.0));
+        a.player.setGain((float)std::pow(10.0, d->playbackGainDb / 20.0) * vol);
     }
     else
     {
         if (d) d->playbackGainDb = 0.0;
-        a.player.setGain(1.0f);
+        a.player.setGain(vol);
     }
 }
 
@@ -350,13 +353,26 @@ static void playActive(App& a)
     d->playhead = 0;
 }
 
+// アクティブタブを現在位置(または選択範囲)から再生開始
+static void startPlayback(App& a)
+{
+    Doc* d = curDoc(a);
+    if (!d) return;
+    applyPlaybackGain(a);
+    a.player.setLoop(a.loop);
+    auto [s, e] = region(*d);
+    bool hasSel = (d->selStart >= 0 && d->selEnd > d->selStart);
+    // ループ戻り先: 選択があれば選択先頭、なければ曲頭(途中から再生してもループは最初へ)
+    a.player.play(d->clip, s, e, hasSel ? s : 0);
+}
+
 static void togglePlay(App& a)
 {
     Doc* d = curDoc(a);
     if (!d) return;
     if (a.player.isPlaying()) a.player.stop();
     else if (a.player.isPaused()) a.player.resume();
-    else { applyPlaybackGain(a); a.player.setLoop(a.loop); auto [s, e] = region(*d); a.player.play(d->clip, s, e); }
+    else startPlayback(a);
 }
 
 static bool addDocNoPlay(App& a, const std::string& path)
@@ -371,8 +387,10 @@ static bool addDocNoPlay(App& a, const std::string& path)
     auto doc = std::make_unique<Doc>();
     doc->clip = std::move(c);
     doc->name = baseName(path);
+    doc->tags = Ffmpeg::readTags(path);   // 入力に埋まっている曲情報を流用(無ければ空)
     a.docs.push_back(std::move(doc));
     a.active = (int)a.docs.size() - 1;
+    a.pendingSelect = a.active;           // プログラム起因の選択(タブ切替停止を抑止)
     if (a.normPlayback) startMeasure(*a.docs.back());  // -14 用の測定はバックグラウンド
     return true;
 }
@@ -482,14 +500,15 @@ static void drawTabs(App& a)
     int newActive = a.active;
     int toClose = -1;
 
-    if (ImGui::BeginTabBar("docs", ImGuiTabBarFlags_AutoSelectNewTabs | ImGuiTabBarFlags_Reorderable |
-                                   ImGuiTabBarFlags_TabListPopupButton))
+    if (ImGui::BeginTabBar("docs", ImGuiTabBarFlags_Reorderable | ImGuiTabBarFlags_TabListPopupButton))
     {
         for (int i = 0; i < (int)a.docs.size(); i++)
         {
             bool open = true;
             ImGui::PushID(i);
-            if (ImGui::BeginTabItem(a.docs[i]->name.c_str(), &open, ImGuiTabItemFlags_None))
+            // プログラム起因の選択は SetSelected で明示（ユーザークリックと区別する）
+            ImGuiTabItemFlags fl = (i == a.pendingSelect) ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
+            if (ImGui::BeginTabItem(a.docs[i]->name.c_str(), &open, fl))
             {
                 newActive = i;
                 ImGui::EndTabItem();
@@ -500,7 +519,13 @@ static void drawTabs(App& a)
         ImGui::EndTabBar();
     }
 
-    if (newActive != a.active) { a.active = newActive; a.player.stop(); }  // タブ切替で停止（排他）
+    bool programmatic = (a.pendingSelect >= 0);
+    if (newActive == a.pendingSelect) a.pendingSelect = -1;   // 選択が追いついたら解除
+    if (newActive != a.active)
+    {
+        a.active = newActive;
+        if (!programmatic) startPlayback(a);  // ユーザーのタブ切替 → 切替先を即再生（排他）
+    }
     if (toClose >= 0) closeDoc(a, toClose);
 }
 
@@ -532,6 +557,10 @@ static void drawUI(App& a)
     if (ImGui::Button("■ 停止")) a.player.stop();
     ImGui::SameLine();
     if (ImGui::Checkbox("ループ", &a.loop)) a.player.setLoop(a.loop);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140);
+    if (ImGui::SliderFloat("##vol", &a.volumePct, 0.0f, 100.0f, "音量 %.0f%%"))
+        applyPlaybackGain(a);
     ImGui::SameLine();
     if (ImGui::Checkbox("-14 LUFSで再生", &a.normPlayback))
     {

@@ -18,7 +18,7 @@ void Player::dataCb(ma_device* d, void* out, const void* /*in*/, ma_uint32 count
     for (ma_uint32 i = 0; i < count; i++)
     {
         if (p->samples_ && pos >= p->end_ && loop)
-            pos = p->start_;   // ループ: 先頭へ
+            pos = p->loopStart_;   // ループ: 戻り先へ(通常=曲頭, 選択=選択先頭)
 
         if (p->samples_ && pos < p->end_)
         {
@@ -55,7 +55,7 @@ void Player::ensureDevice(int channels, int sampleRate)
     }
 }
 
-void Player::play(const AudioClip& clip, long long s, long long e)
+void Player::play(const AudioClip& clip, long long s, long long e, long long loopStart)
 {
     stop();
     ensureDevice(clip.channels, clip.sampleRate);
@@ -64,6 +64,7 @@ void Player::play(const AudioClip& clip, long long s, long long e)
     samples_ = clip.samples.data();
     channels_ = clip.channels;
     start_ = (uint64_t)s;
+    loopStart_ = (uint64_t)(loopStart >= 0 ? loopStart : s);
     end_ = (uint64_t)e;
     pos_.store((uint64_t)s);
     reachedEnd_.store(false);

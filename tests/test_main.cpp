@@ -114,6 +114,19 @@ int main()
         p.stop();
     }
 
+    // 6b) 途中から再生+ループ → 戻り先は曲頭(0)（再生開始地点ではない）
+    {
+        Player p;
+        p.setLoop(true);
+        // 0.5s 地点から 0.6s 地点まで再生、ループ戻り先=0
+        p.play(clip, 22050, 26460, 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(350));  // 終端到達→0へ巻き戻るはず
+        long long pos = p.positionFrame();
+        check("loop: wraps to track head (pos < play start)", p.isPlaying() && pos < 22050,
+              "pos=" + std::to_string(pos) + " (started at 22050)");
+        p.stop();
+    }
+
     // 7) 多形式書き出し + タグ埋め込み
     if (Ffmpeg::available())
     {
@@ -136,6 +149,15 @@ int main()
             long long sz = f.good() ? (long long)f.tellg() : 0;
             check(std::string("encode ") + ext, ok && sz > 0,
                   ok ? ("size=" + std::to_string(sz)) : ("err=" + err));
+        }
+
+        // readTags: 書き出したファイルからタグを読み戻す(入力タグの流用経路)
+        {
+            Tags rt = Ffmpeg::readTags("D:/PlayerEditor/build/pe_out.flac");
+            check("readTags flac: title", rt.title == "PE Test Title", "got=[" + rt.title + "]");
+            check("readTags flac: artist", rt.artist == "PE Artist", "got=[" + rt.artist + "]");
+            Tags rm = Ffmpeg::readTags("D:/PlayerEditor/build/pe_out.mp3");
+            check("readTags mp3: album", rm.album == "PE Album", "got=[" + rm.album + "]");
         }
 
         // タグが実際に埋め込まれたか flac を ffprobe で確認

@@ -14,7 +14,10 @@ public:
     Player() = default;
     ~Player();
 
-    void play(const AudioClip& clip, long long startFrame, long long endFrame);
+    // loopStartFrame: ループ時の戻り先(-1 = startFrame と同じ)。
+    // 通常再生は曲頭(0)、選択範囲再生は選択先頭を渡す。
+    void play(const AudioClip& clip, long long startFrame, long long endFrame,
+              long long loopStartFrame = -1);
     void pause();
     void resume();
     void stop();
@@ -45,6 +48,7 @@ private:
     int channels_ = 0;
     std::atomic<uint64_t> pos_{0};
     uint64_t start_ = 0;
+    uint64_t loopStart_ = 0;   // ループ時の戻り先
     uint64_t end_ = 0;
     std::atomic<bool> reachedEnd_{false};
     std::atomic<float> gain_{1.0f};

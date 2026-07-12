@@ -111,21 +111,21 @@ namespace
         try { return std::stod(v); } catch (...) { return NAN; }
     }
 
-    std::string locate()
+    std::string locate(const char* tool)
     {
 #ifdef _WIN32
-        const char* exe = "ffmpeg.exe";
-        if (fileExists(std::string("ffmpeg/") + exe)) return std::string("ffmpeg/") + exe;
+        std::string exe = std::string(tool) + ".exe";
+        if (fileExists("ffmpeg/" + exe)) return "ffmpeg/" + exe;
         const char* lad = std::getenv("LOCALAPPDATA");
         if (lad)
         {
-            std::string w = std::string(lad) + "\\Microsoft\\WinGet\\Links\\ffmpeg.exe";
+            std::string w = std::string(lad) + "\\Microsoft\\WinGet\\Links\\" + exe;
             if (fileExists(w)) return w;
         }
-        for (const char* c : { "C:\\ffmpeg\\bin\\ffmpeg.exe", "C:\\ProgramData\\chocolatey\\bin\\ffmpeg.exe" })
+        for (std::string c : { "C:\\ffmpeg\\bin\\" + exe, "C:\\ProgramData\\chocolatey\\bin\\" + exe })
             if (fileExists(c)) return c;
         // PATH 探索も窓なしで
-        std::string r = runHiddenW(L"where.exe ffmpeg");
+        std::string r = runHiddenW(L"where.exe " + plat::utf8ToWide(tool));
         if (!r.empty())
         {
             auto nl = r.find_first_of("\r\n");
@@ -133,9 +133,10 @@ namespace
             if (fileExists(first)) return first;
         }
 #else
-        for (const char* c : { "/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg" })
+        for (std::string c : { std::string("/usr/bin/") + tool, std::string("/usr/local/bin/") + tool,
+                               std::string("/opt/homebrew/bin/") + tool })
             if (fileExists(c)) return c;
-        std::string r = runCapture("which ffmpeg 2>/dev/null");
+        std::string r = runCapture(std::string("which ") + tool + " 2>/dev/null");
         if (!r.empty())
         {
             auto nl = r.find_first_of("\r\n");
@@ -145,6 +146,29 @@ namespace
 #endif
         return "";
     }
+
+    // JSON の "key" : "value" の value を軽くアンエスケープ
+    std::string jsonUnescape(const std::string& s)
+    {
+        std::string r;
+        for (size_t i = 0; i < s.size(); i++)
+        {
+            if (s[i] == '\\' && i + 1 < s.size())
+            {
+                char c = s[++i];
+                switch (c)
+                {
+                    case 'n': r += '\n'; break;
+                    case 't': r += '\t'; break;
+                    case 'r': break;
+                    case 'u': i += 4; r += '?'; break;   // 簡易対応
+                    default: r += c; break;              // \" \\ \/ など
+                }
+            }
+            else r += s[i];
+        }
+        return r;
+    }
 }
 
 namespace Ffmpeg
@@ -153,7 +177,34 @@ namespace Ffmpeg
     {
         static std::string cached;
         static bool searched = false;
-        if (!searched) { cached = locate(); searched = true; }
+        if (!searched) { cached = locate("ffmpeg"); searched = true; }
+        return cached;
+    }
+
+    const std::string& findFfprobe()
+    {
+        static std::string cached;
+        static bool searched = false;
+        if (!searched)
+        {
+            // まず ffmpeg と同じフォルダを見る
+            const std::string& ff = findFfmpeg();
+            if (!ff.empty())
+            {
+                auto slash = ff.find_last_of("/\\");
+                if (slash != std::string::npos)
+                {
+#ifdef _WIN32
+                    std::string cand = ff.substr(0, slash + 1) + "ffprobe.exe";
+#else
+                    std::string cand = ff.substr(0, slash + 1) + "ffprobe";
+#endif
+                    if (fileExists(cand)) cached = cand;
+                }
+            }
+            if (cached.empty()) cached = locate("ffprobe");
+            searched = true;
+        }
         return cached;
     }
 
@@ -186,6 +237,59 @@ namespace Ffmpeg
         res.loudnessRange = lra;
         res.ok = true;
         return res;
+    }
+
+    Tags readTags(const std::string& input)
+    {
+        Tags t;
+        const std::string& fp = findFfprobe();
+        if (fp.empty()) return t;
+
+#ifdef _WIN32
+        std::wstring cmd = quoteW(plat::utf8ToWide(fp)) +
+            L" -v quiet -print_format json -show_format " + quoteW(plat::utf8ToWide(input));
+        std::string out = runHiddenW(cmd);
+#else
+        std::string out = runCapture("\"" + fp + "\" -v quiet -print_format json -show_format \"" + input + "\" 2>/dev/null");
+#endif
+
+        // "tags" オブジェクト内の "key": "value" を素朴に走査
+        auto tpos = out.find("\"tags\"");
+        if (tpos == std::string::npos) return t;
+        auto brace = out.find('{', tpos);
+        if (brace == std::string::npos) return t;
+        auto end = out.find('}', brace);   // tags は文字列のみでネストしない
+        if (end == std::string::npos) return t;
+
+        size_t i = brace + 1;
+        while (i < end)
+        {
+            auto k1 = out.find('"', i);
+            if (k1 == std::string::npos || k1 >= end) break;
+            auto k2 = out.find('"', k1 + 1);
+            if (k2 == std::string::npos || k2 >= end) break;
+            std::string key = out.substr(k1 + 1, k2 - k1 - 1);
+
+            auto colon = out.find(':', k2);
+            if (colon == std::string::npos || colon >= end) break;
+            auto v1 = out.find('"', colon);
+            if (v1 == std::string::npos || v1 >= end) break;
+            size_t v2 = v1 + 1;
+            while (v2 < end && !(out[v2] == '"' && out[v2 - 1] != '\\')) v2++;
+            std::string val = jsonUnescape(out.substr(v1 + 1, v2 - v1 - 1));
+            i = v2 + 1;
+
+            std::string lk;
+            for (char c : key) lk += (char)tolower((unsigned char)c);
+            if (lk == "title") t.title = val;
+            else if (lk == "artist") t.artist = val;
+            else if (lk == "album") t.album = val;
+            else if (lk == "album_artist" || lk == "albumartist") t.albumArtist = val;
+            else if (lk == "genre") t.genre = val;
+            else if (lk == "date" || lk == "year") t.year = val;
+            else if (lk == "track" || lk == "tracknumber") t.track = val;
+        }
+        return t;
     }
 
     bool transcode(const std::string& inWav, const std::string& outPath,

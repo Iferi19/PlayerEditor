@@ -23,8 +23,12 @@ struct Tags
 namespace Ffmpeg
 {
     const std::string& findFfmpeg();   // 見つからなければ ""
+    const std::string& findFfprobe();
     bool available();
     LoudnessResult measure(const std::string& input, std::string& err);
+
+    // 入力ファイルに埋め込まれた曲情報を読む(ffprobe)。無ければ空のまま。
+    Tags readTags(const std::string& input);
 
     // float WAV(inWav) を fmt("wav"/"mp3"/"m4a"/"flac"/"ogg"/"aif") にエンコードし、
     // 対応形式なら tags を埋め込む。成功で true。
