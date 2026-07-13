@@ -1370,8 +1370,8 @@ static void drawVideoPane(App& a, Doc& d, ImVec2 size)
     ImVec2 p1(p0.x + size.x, p0.y + size.y);
 
     // コントロールバーの表示判定:
-    // ペイン内でカーソルが動いた直後 / バー上に置いている間 / ドラッグ操作中 は表示。
-    // カーソル静止2.5秒 or ペイン外で自動的に隠れる。
+    // カーソルが動いた直後は表示、静止2.5秒 or ペイン外で隠す(バー上に置きっぱなしでも隠す)。
+    // シークバー/ハンドルのドラッグ中(IsAnyItemActive)は消さない。
     ImGuiIO& io = ImGui::GetIO();
     double now = ImGui::GetTime();
     if (io.MouseDelta.x != 0 || io.MouseDelta.y != 0) a.lastMouseMove = now;
@@ -1379,7 +1379,12 @@ static void drawVideoPane(App& a, Doc& d, ImVec2 size)
     const float barH = 48.0f;
     bool inBarArea = hoverPane && io.MousePos.y > p1.y - barH;
     bool showCtl = (hoverPane || a.fullscreen)
-                && (now - a.lastMouseMove < 2.5 || inBarArea || ImGui::IsMouseDown(ImGuiMouseButton_Left));
+                && (now - a.lastMouseMove < 2.5 || ImGui::IsAnyItemActive());
+
+    // 全画面でバーが消えている間はマウスカーソルも隠す(YouTube方式)
+    if (a.window)
+        glfwSetInputMode(a.window, GLFW_CURSOR,
+                         (a.fullscreen && !showCtl) ? GLFW_CURSOR_HIDDEN : GLFW_CURSOR_NORMAL);
 
     // クリックで再生/一時停止、ダブルクリックで全画面(いずれもバー領域は除外)
     bool inBar = showCtl && inBarArea;
