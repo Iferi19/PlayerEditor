@@ -1298,6 +1298,9 @@ static void drawVideoControls(App& a, Doc& d, ImVec2 p0, ImVec2 p1)
 static void drawVideoPane(App& a, Doc& d, ImVec2 size)
 {
     ImVec2 p0 = ImGui::GetCursorScreenPos();
+    // 後から重ねるコントロール(シークバー等)に入力を通す。
+    // これが無いと、先に置いたこの下地ボタンが全入力を奪ってバーが反応しない。
+    ImGui::SetNextItemAllowOverlap();
     ImGui::InvisibleButton("video", size);
     ImVec2 p1(p0.x + size.x, p0.y + size.y);
 
@@ -1338,6 +1341,9 @@ static void drawVideoPane(App& a, Doc& d, ImVec2 size)
     }
 
     if (showCtl) drawVideoControls(a, d, p0, p1);
+
+    // オーバーレイ配置でカーソルがずれるので、次のウィジェット(波形等)のために復元
+    ImGui::SetCursorScreenPos(ImVec2(p0.x, p1.y));
 }
 
 static void drawWaveform(App& a, Doc& d, ImVec2 size)
