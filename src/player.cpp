@@ -16,7 +16,9 @@ void Player::dataCb(ma_device* d, void* out, const void* /*in*/, ma_uint32 count
 
     // モニターチェーンはUIスレッドから差し替わるため保護(切替時のみ競合)
     std::lock_guard<std::mutex> lk(p->monM_);
-    bool hasMon = !p->monFilters_.empty() || p->monMono_;
+    float wdt = p->width_.load();
+    bool doWidth = (ch == 2 && wdt != 1.0f);
+    bool doProc = (!p->monFilters_.empty() || p->monMono_ || doWidth) && ch <= Bq::kMaxCh;
 
     bool loop = p->loop_.load();
     float fr[Bq::kMaxCh];
@@ -28,9 +30,19 @@ void Player::dataCb(ma_device* d, void* out, const void* /*in*/, ma_uint32 count
         if (p->samples_ && pos < p->end_)
         {
             const float* src = p->samples_ + pos * ch;
-            if (hasMon && ch <= Bq::kMaxCh)
+            if (doProc)
             {
                 for (int c = 0; c < ch; c++) fr[c] = src[c];
+
+                // ステレオ幅 (M/S): S成分をスケール
+                if (doWidth)
+                {
+                    float m = 0.5f * (fr[0] + fr[1]);
+                    float s = 0.5f * (fr[0] - fr[1]) * wdt;
+                    fr[0] = m + s;
+                    fr[1] = m - s;
+                }
+
                 for (auto& f : p->monFilters_)
                     for (int c = 0; c < ch; c++) fr[c] = f.process(fr[c], c);
                 if (p->monMono_ && ch > 1)

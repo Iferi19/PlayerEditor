@@ -42,6 +42,10 @@ public:
     // モニターシミュレーション(再生のみに掛かるフィルタ列。mono=モノラル合算)
     void setMonitor(const std::vector<Bq::Spec>& specs, bool mono);
 
+    // ステレオ幅 (M/S処理)。1.0=原音, 0=モノラル, 2=ワイド。ステレオ素材のみ有効。
+    void setStereoWidth(float w) { width_.store(w); }
+    float stereoWidth() const { return width_.load(); }
+
     State state() const { return state_; }
     bool isPlaying() const { return state_ == State::Playing; }
     bool isPaused() const { return state_ == State::Paused; }
@@ -65,6 +69,7 @@ private:
     std::atomic<bool> reachedEnd_{false};
     std::atomic<bool> justFinished_{false};
     std::atomic<float> gain_{1.0f};
+    std::atomic<float> width_{1.0f};
     std::atomic<bool> loop_{false};
     State state_ = State::Stopped;
 

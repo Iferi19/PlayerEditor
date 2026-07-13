@@ -67,8 +67,9 @@ struct Doc
     long long playhead = 0;
     long long selStart = -1, selEnd = -1;
 
-    std::vector<float> pkMin, pkMax;
+    std::vector<float> pkMin, pkMax;   // レーンごとに cols 個並ぶ (lane0, lane1)
     int pkWidth = -1;
+    int pkLanes = 1;                   // 1=モノ表示, 2=ステレオL/R
 
     LoudnessResult loud;
     bool loudValid = false;
@@ -114,6 +115,7 @@ struct App
     bool normPlayback = true;   // 再生を -14 LUFS に（デフォルトON）
     bool loop = false;
     float volumePct = 100.0f;   // 音量スライダー(0-100%)
+    float stereoWidthPct = 100.0f;   // ステレオ幅(0=モノ,100=原音,200=ワイド)
     int pendingSelect = -1;     // プログラム起因のタブ選択(切替時に停止させない)
     bool showAnalysis = false;  // 解析サイドパネル表示
     int monitorIdx = 0;         // モニターシミュレーション(kMonitors)
@@ -188,32 +190,34 @@ static void loadFont(ImGuiIO& io)
 
 static void computePeaks(Doc& d, int cols)
 {
-    d.pkMin.assign(cols, 0.0f);
-    d.pkMax.assign(cols, 0.0f);
-    const auto& s = d.clip.samples;
     int ch = d.clip.channels;
+    int lanes = (ch >= 2) ? 2 : 1;   // ステレオ以上は L/R の2段(3ch以上は先頭2ch)
+    d.pkMin.assign((size_t)cols * lanes, 0.0f);
+    d.pkMax.assign((size_t)cols * lanes, 0.0f);
+    const auto& s = d.clip.samples;
     long long frames = d.clip.frameCount();
 
-    for (int c = 0; c < cols; c++)
+    for (int lane = 0; lane < lanes; lane++)
     {
-        long long f0 = (long long)((double)c / cols * frames);
-        long long f1 = (long long)((double)(c + 1) / cols * frames);
-        if (f1 <= f0) f1 = f0 + 1;
-        float mn = 1.0f, mx = -1.0f;
-        for (long long f = f0; f < f1 && f < frames; f++)
+        for (int c = 0; c < cols; c++)
         {
-            float v = 0.0f;
-            const float* p = &s[(size_t)f * ch];
-            for (int k = 0; k < ch; k++) v += p[k];
-            v /= ch;
-            if (v < mn) mn = v;
-            if (v > mx) mx = v;
+            long long f0 = (long long)((double)c / cols * frames);
+            long long f1 = (long long)((double)(c + 1) / cols * frames);
+            if (f1 <= f0) f1 = f0 + 1;
+            float mn = 1.0f, mx = -1.0f;
+            for (long long f = f0; f < f1 && f < frames; f++)
+            {
+                float v = s[(size_t)(f * ch + lane)];
+                if (v < mn) mn = v;
+                if (v > mx) mx = v;
+            }
+            if (mn > mx) { mn = 0.0f; mx = 0.0f; }
+            d.pkMin[(size_t)(lane * cols + c)] = mn;
+            d.pkMax[(size_t)(lane * cols + c)] = mx;
         }
-        if (mn > mx) { mn = 0.0f; mx = 0.0f; }
-        d.pkMin[c] = mn;
-        d.pkMax[c] = mx;
     }
     d.pkWidth = cols;
+    d.pkLanes = lanes;
 }
 
 static std::pair<long long, long long> region(const Doc& d)
@@ -1456,9 +1460,6 @@ static void drawWaveform(App& a, Doc& d, ImVec2 size)
     ImVec2 p1(p0.x + size.x, p0.y + size.y);
 
     dl->AddRectFilled(p0, p1, IM_COL32(18, 18, 20, 255));
-    float mid = p0.y + size.y * 0.5f;
-    float halfH = size.y * 0.5f;
-    dl->AddLine(ImVec2(p0.x, mid), ImVec2(p1.x, mid), IM_COL32(64, 64, 68, 255));
 
     long long frames = d.clip.frameCount();
     auto frameToX = [&](long long f) { return p0.x + (frames > 0 ? (float)((double)f / frames * size.x) : 0.0f); };
@@ -1469,6 +1470,7 @@ static void drawWaveform(App& a, Doc& d, ImVec2 size)
 
     int cols = std::max(1, (int)size.x);
     if (d.pkWidth != cols) computePeaks(d, cols);
+    int lanes = std::max(1, d.pkLanes);
 
     if (d.selStart >= 0 && d.selEnd > d.selStart)
     {
@@ -1476,12 +1478,30 @@ static void drawWaveform(App& a, Doc& d, ImVec2 size)
         dl->AddRectFilled(ImVec2(x0, p0.y), ImVec2(std::max(x0 + 1, x1), p1.y), IM_COL32(78, 201, 176, 64));
     }
 
-    int n = std::min(cols, (int)d.pkMin.size());
-    for (int c = 0; c < n; c++)
+    // レーンごと(モノ=1段, ステレオ=L/R 2段)に波形を描く
+    float laneH = size.y / lanes;
+    int n = std::min(cols, (int)(d.pkMin.size() / lanes));
+    for (int lane = 0; lane < lanes; lane++)
     {
-        float x = p0.x + c + 0.5f;
-        dl->AddLine(ImVec2(x, mid - d.pkMax[c] * halfH), ImVec2(x, mid - d.pkMin[c] * halfH),
-                    IM_COL32(78, 201, 176, 255));
+        float mid = p0.y + laneH * lane + laneH * 0.5f;
+        float halfH = laneH * 0.5f * 0.95f;
+        dl->AddLine(ImVec2(p0.x, mid), ImVec2(p1.x, mid), IM_COL32(64, 64, 68, 255));
+
+        const float* mn = &d.pkMin[(size_t)(lane * cols)];
+        const float* mx = &d.pkMax[(size_t)(lane * cols)];
+        for (int c = 0; c < n; c++)
+        {
+            float x = p0.x + c + 0.5f;
+            dl->AddLine(ImVec2(x, mid - mx[c] * halfH), ImVec2(x, mid - mn[c] * halfH),
+                        IM_COL32(78, 201, 176, 255));
+        }
+    }
+    if (lanes == 2)
+    {
+        // レーン境界とチャンネルラベル
+        dl->AddLine(ImVec2(p0.x, p0.y + laneH), ImVec2(p1.x, p0.y + laneH), IM_COL32(45, 45, 50, 255));
+        dl->AddText(ImVec2(p0.x + 5, p0.y + 3), IM_COL32(140, 140, 145, 200), "L");
+        dl->AddText(ImVec2(p0.x + 5, p0.y + laneH + 3), IM_COL32(140, 140, 145, 200), "R");
     }
 
     float phx = frameToX(d.playhead);
@@ -1597,9 +1617,15 @@ static void drawUI(App& a)
     ImGui::SameLine();
     if (ImGui::Checkbox("ループ", &a.loop)) a.player.setLoop(a.loop);
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(140);
+    ImGui::SetNextItemWidth(115);
     if (ImGui::SliderFloat("##vol", &a.volumePct, 0.0f, 100.0f, "音量 %.0f%%"))
         applyPlaybackGain(a);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(120);
+    if (ImGui::SliderFloat("##stw", &a.stereoWidthPct, 0.0f, 200.0f, "ST幅 %.0f%%"))
+        a.player.setStereoWidth(a.stereoWidthPct / 100.0f);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("ステレオ幅 (M/S): 0%%=モノラル 100%%=原音 200%%=ワイド\n再生のみ、書き出しには影響しません");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(150);
     if (ImGui::BeginCombo("##monitor", kMonitors[(size_t)a.monitorIdx].name))
@@ -1808,7 +1834,7 @@ int main(int argc, char** argv)
     if (!glfwInit()) return 1;
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    GLFWwindow* win = glfwCreateWindow(1230, 680, "PlayerEditor", nullptr, nullptr);
+    GLFWwindow* win = glfwCreateWindow(1330, 680, "PlayerEditor", nullptr, nullptr);
     if (!win) { glfwTerminate(); return 1; }
     glfwMakeContextCurrent(win);
     glfwSwapInterval(1);
