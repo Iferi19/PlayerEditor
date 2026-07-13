@@ -476,6 +476,30 @@ int main()
         else std::printf("[SKIP] video tests (pe_test_video.mp4 not present)\n");
     }
 
+    // 13b) カバーアート付き音声は「映像」扱いしない
+    {
+        const std::string cov = "D:/PlayerEditor/build/pe_test_cover.mp3";
+        std::ifstream cf(cov);
+        if (cf.good() && Ffmpeg::available())
+        {
+            auto si = Ffmpeg::probe(cov);
+            check("coverart: not detected as video", !si.hasVideo,
+                  si.hasVideo ? "hasVideo=true (BUG)" : "ok");
+            check("coverart: audio detected", si.hasAudio && si.sampleRate > 0,
+                  "sr=" + std::to_string(si.sampleRate));
+        }
+        else std::printf("[SKIP] cover-art test (pe_test_cover.mp3 not present)\n");
+
+        // 本物の動画は引き続き映像として検出されること(回帰確認)
+        const std::string vid2 = "D:/PlayerEditor/build/pe_test_video.mp4";
+        std::ifstream vf2(vid2);
+        if (vf2.good() && Ffmpeg::available())
+        {
+            auto si2 = Ffmpeg::probe(vid2);
+            check("coverart: real video still detected", si2.hasVideo && si2.width == 320, "");
+        }
+    }
+
     // 14) ステレオ計測 (位相相関 / 幅)
     {
         // デュアルモノ(testtoneはL=R): 相関+1, 幅0%
