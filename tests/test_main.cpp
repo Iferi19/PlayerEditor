@@ -8,6 +8,7 @@
 #include "spectrum.h"
 #include "biquad.h"
 #include "stereo.h"
+#include "reference.h"
 #include "video_reader.h"
 
 #include <chrono>
@@ -546,6 +547,26 @@ int main()
         std::string j = Analysis::toJson(ad);
         check("stereo: json has correlation", j.find("\"phase_correlation\": 1.00") != std::string::npos, "");
         check("stereo: json has width", j.find("\"stereo_width_pct\":") != std::string::npos, "");
+    }
+
+    // 15) ジャンル参考モデル
+    {
+        const auto& gs = RefModel::genres();
+        check("ref: genres present", gs.size() >= 5, "n=" + std::to_string(gs.size()));
+        bool sane = true;
+        for (const auto& g : gs)
+            if (!(g.corrMin < g.corrMax && g.widthMin < g.widthMax)) sane = false;
+        check("ref: ranges sane (min<max)", sane, "");
+
+        const auto& pop = gs[0];
+        check("ref: anchor at 1kHz = 0dB", std::fabs(RefModel::specAt(pop, 1000.0f) - pop.spec[5]) < 1e-5f, "");
+        // 対数中点(63Hzと125Hzの幾何平均~88.9Hz)は両端の平均になる
+        float midv = RefModel::specAt(pop, std::sqrt(63.0f * 125.0f));
+        check("ref: log-midpoint interpolates", std::fabs(midv - (pop.spec[1] + pop.spec[2]) * 0.5f) < 0.05f,
+              "mid=" + std::to_string(midv));
+        // 範囲外は端の値
+        check("ref: below range clamps", RefModel::specAt(pop, 10.0f) == pop.spec[0], "");
+        check("ref: above range clamps", RefModel::specAt(pop, 30000.0f) == pop.spec[9], "");
     }
 
     std::printf("\n%s\n", g_fail == 0 ? "=> ALL PASS" : ("=> " + std::to_string(g_fail) + " FAILED").c_str());
