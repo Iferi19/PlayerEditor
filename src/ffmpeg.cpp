@@ -4,12 +4,15 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <string>
 #include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+typedef unsigned long DWORD;   // 終了コード受け渡し用
 #endif
 
 namespace
@@ -30,9 +33,11 @@ namespace
         return r;
     }
 
-    // 子プロセスを「窓なし」で起動し、stdout+stderr をまとめて取得する。
+    // 子プロセスを「窓なし」で起動し、出力を取得する。
+    // mergeStderr=true: stdout+stderr 混合(ログ解析用) / false: stdoutのみ(バイナリ出力用、stderrは捨てる)。
     // cmd.exe を介さないので一瞬のコンソール窓も出ない。exitCode に終了コードを返す(任意)。
-    std::string runHiddenW(const std::wstring& cmdline, DWORD* exitCode = nullptr)
+    std::string runHiddenW(const std::wstring& cmdline, DWORD* exitCode = nullptr,
+                           bool mergeStderr = true)
     {
         std::string out;
         SECURITY_ATTRIBUTES sa{};
@@ -51,7 +56,7 @@ namespace
         si.dwFlags = STARTF_USESTDHANDLES;
         si.hStdInput = nul;
         si.hStdOutput = wr;
-        si.hStdError = wr;
+        si.hStdError = mergeStderr ? wr : nul;   // バイナリ出力時はstderrを混ぜない
 
         PROCESS_INFORMATION pi{};
         std::vector<wchar_t> buf(cmdline.begin(), cmdline.end());
@@ -237,6 +242,106 @@ namespace Ffmpeg
         res.loudnessRange = lra;
         res.ok = true;
         return res;
+    }
+
+    // 共通: コマンドを窓なしで実行して出力を得る。
+    // mergeStderr=false でバイナリ安全(stdoutのみ)。
+    static std::string runTool(const std::string& exe, const std::vector<std::string>& args,
+                               DWORD* exitCode = nullptr, bool mergeStderr = true)
+    {
+#ifdef _WIN32
+        std::wstring cmd = quoteW(plat::utf8ToWide(exe));
+        for (auto& a : args) cmd += L" " + quoteW(plat::utf8ToWide(a));
+        return runHiddenW(cmd, exitCode, mergeStderr);
+#else
+        std::string cmd = "\"" + exe + "\"";
+        for (auto& a : args) cmd += " \"" + a + "\"";
+        cmd += mergeStderr ? " 2>&1" : " 2>/dev/null";
+        if (exitCode) *exitCode = 0;
+        return runCapture(cmd);
+#endif
+    }
+
+    StreamInfo probe(const std::string& input)
+    {
+        StreamInfo si;
+        const std::string& fp = findFfprobe();
+        if (fp.empty()) return si;
+
+        // 音声: sample_rate,channels
+        std::string au = runTool(fp, { "-v", "error", "-select_streams", "a:0",
+            "-show_entries", "stream=sample_rate,channels", "-of", "csv=p=0", input },
+            nullptr, false);
+        if (!au.empty())
+        {
+            int sr = 0, ch = 0;
+            if (std::sscanf(au.c_str(), "%d,%d", &sr, &ch) == 2 && sr > 0 && ch > 0)
+            {
+                si.hasAudio = true;
+                si.sampleRate = sr;
+                si.channels = ch;
+            }
+        }
+
+        // 映像: width,height,avg_frame_rate (mjpegカバーアート等の attached_pic は除外したいが v1 は許容)
+        std::string vi = runTool(fp, { "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height,avg_frame_rate", "-of", "csv=p=0", input },
+            nullptr, false);
+        if (!vi.empty())
+        {
+            int w = 0, h = 0, num = 0, den = 1;
+            if (std::sscanf(vi.c_str(), "%d,%d,%d/%d", &w, &h, &num, &den) >= 3 && w > 0 && h > 0)
+            {
+                si.hasVideo = true;
+                si.width = w;
+                si.height = h;
+                si.fps = (den > 0 && num > 0) ? (double)num / den : 30.0;
+                if (si.fps <= 0 || si.fps > 240) si.fps = 30.0;
+            }
+        }
+        return si;
+    }
+
+    bool decodeAudio(const std::string& input, PcmData& out, std::string& err)
+    {
+        const std::string& ff = findFfmpeg();
+        if (ff.empty()) { err = "ffmpeg が見つかりません。"; return false; }
+
+        StreamInfo si = probe(input);
+        if (!si.hasAudio) { err = "音声ストリームがありません。"; return false; }
+
+        DWORD ec = 1;
+        std::string raw = runTool(ff, { "-hide_banner", "-loglevel", "error", "-i", input,
+            "-map", "0:a:0", "-f", "f32le", "-acodec", "pcm_f32le", "-" }, &ec, false);
+        if (ec != 0 || raw.size() < 4) { err = "音声のデコードに失敗しました。"; return false; }
+
+        size_t n = raw.size() / 4;
+        out.samples.resize(n);
+        std::memcpy(out.samples.data(), raw.data(), n * 4);
+        out.channels = si.channels;
+        out.sampleRate = si.sampleRate;
+        return true;
+    }
+
+    bool cutVideoCopy(const std::string& input, const std::string& outPath,
+                      double t0, double t1, std::string& err)
+    {
+        const std::string& ff = findFfmpeg();
+        if (ff.empty()) { err = "ffmpeg が見つかりません。"; return false; }
+
+        char ss[32], tt[32];
+        std::snprintf(ss, sizeof(ss), "%.3f", t0);
+        std::snprintf(tt, sizeof(tt), "%.3f", t1 - t0);
+
+        DWORD ec = 1;
+        std::string log = runTool(ff, { "-y", "-hide_banner", "-loglevel", "error",
+            "-ss", ss, "-i", input, "-t", tt, "-c", "copy", outPath }, &ec);
+        if (ec != 0)
+        {
+            err = "動画の切り出しに失敗: " + (log.empty() ? std::string("ffmpeg error") : log.substr(0, 300));
+            return false;
+        }
+        return true;
     }
 
     Tags readTags(const std::string& input)

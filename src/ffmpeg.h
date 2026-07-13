@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <vector>
 
 struct LoudnessResult
 {
@@ -20,12 +21,38 @@ struct Tags
     }
 };
 
+struct StreamInfo
+{
+    bool hasAudio = false;
+    int sampleRate = 0, channels = 0;
+    bool hasVideo = false;
+    int width = 0, height = 0;
+    double fps = 0;
+};
+
+struct PcmData
+{
+    std::vector<float> samples;   // インターリーブ f32
+    int channels = 0;
+    int sampleRate = 0;
+};
+
 namespace Ffmpeg
 {
     const std::string& findFfmpeg();   // 見つからなければ ""
     const std::string& findFfprobe();
     bool available();
     LoudnessResult measure(const std::string& input, std::string& err);
+
+    // ffprobe でストリーム情報(音声sr/ch、映像w/h/fps)を取得
+    StreamInfo probe(const std::string& input);
+
+    // 先頭音声ストリームを f32 PCM にデコード(動画コンテナやminiaudio未対応形式用)
+    bool decodeAudio(const std::string& input, PcmData& out, std::string& err);
+
+    // 映像+音声を再エンコードなしで [t0,t1) 秒で切り出し(キーフレーム精度)
+    bool cutVideoCopy(const std::string& input, const std::string& outPath,
+                      double t0, double t1, std::string& err);
 
     // 入力ファイルに埋め込まれた曲情報を読む(ffprobe)。無ければ空のまま。
     Tags readTags(const std::string& input);
