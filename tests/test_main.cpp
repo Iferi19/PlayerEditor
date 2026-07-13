@@ -120,6 +120,19 @@ int main()
         p.stop();
     }
 
+    // 6a2) 自然終了: justFinished が立ち、位置は正確に終端
+    {
+        Player p;
+        p.play(clip, 0, 4410);   // 0.1s だけ再生
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        p.update();   // メインループ相当: 終端検出 → 停止 + フラグ
+        bool fin = p.takeJustFinished();
+        check("finish: justFinished flag", fin, "");
+        check("finish: end frame reported", p.endFrame() == 4410,
+              "end=" + std::to_string(p.endFrame()));
+        check("finish: flag cleared after take", !p.takeJustFinished(), "");
+    }
+
     // 6b) 途中から再生+ループ → 戻り先は曲頭(0)（再生開始地点ではない）
     {
         Player p;

@@ -26,6 +26,11 @@ public:
     void stop();
     void update();   // UI から毎フレーム呼ぶ: 終端で自動停止
 
+    // 直前の update() で自然終了したか(読むとクリアされる)。
+    // UI側はこれを見て再生位置を正確に終端へスナップする。
+    bool takeJustFinished() { return justFinished_.exchange(false); }
+    long long endFrame() const { return (long long)end_; }
+
     // 再生時ゲイン(線形)。1.0=素通し。-14 LUFS再生モードで使う。
     void setGain(float g) { gain_.store(g); }
     float gain() const { return gain_.load(); }
@@ -58,6 +63,7 @@ private:
     uint64_t loopStart_ = 0;   // ループ時の戻り先
     uint64_t end_ = 0;
     std::atomic<bool> reachedEnd_{false};
+    std::atomic<bool> justFinished_{false};
     std::atomic<float> gain_{1.0f};
     std::atomic<bool> loop_{false};
     State state_ = State::Stopped;

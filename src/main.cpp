@@ -1857,7 +1857,12 @@ int main(int argc, char** argv)
         glfwPollEvents();
         app.player.update();
         if (Doc* d = curDoc(app))
+        {
             if (app.player.isPlaying()) d->playhead = app.player.positionFrame();
+            // 自然終了時: メインループのコピーが終端の少し手前で止まることがあるので
+            // 正確に終端へスナップする(次の再生開始で「先頭に戻す」判定を確実に通す)
+            if (app.player.takeJustFinished()) d->playhead = app.player.endFrame();
+        }
         pollMeasure(app);
         updateVideo(app);
 
