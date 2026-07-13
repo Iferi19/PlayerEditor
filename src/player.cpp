@@ -140,5 +140,8 @@ void Player::stop()
 void Player::update()
 {
     if (state_ == State::Playing && reachedEnd_.load())
+    {
         stop();
+        justFinished_.store(true);
+    }
 }
