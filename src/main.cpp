@@ -341,7 +341,13 @@ struct MonitorProfile
 };
 static const std::vector<MonitorProfile> kMonitors = {
     { "フラット", false, {} },
-    { "スマホ(内蔵スピーカー)", true, {
+    { "スマホ(最近の機種)", false, {
+        // 現行フラッグシップ想定: ステレオ、~200Hzまで再生、中高域は比較的フラットで軽い輝き
+        { Bq::Type::Highpass, 200, 0.707f, 0 },
+        { Bq::Type::Highpass, 200, 0.707f, 0 },
+        { Bq::Type::Peaking, 3000, 1.5f, 2 } } },
+    { "スマホ(安価/旧機種)", true, {
+        // 旧来のモノラル小口径: 低域なし+中域の張り
         { Bq::Type::Highpass, 500, 0.707f, 0 },
         { Bq::Type::Highpass, 500, 0.707f, 0 },
         { Bq::Type::Peaking, 2500, 2.0f, 4 },
