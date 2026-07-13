@@ -56,7 +56,8 @@ add_executable(PlayerEditor
     src/audio_clip.cpp
     src/player.cpp
     src/wav_io.cpp
-    src/ffmpeg.cpp)
+    src/ffmpeg.cpp
+    src/video_reader.cpp)
 target_include_directories(PlayerEditor PRIVATE
     ${miniaudio_SOURCE_DIR}
     ${pfd_SOURCE_DIR})
@@ -79,7 +80,8 @@ add_executable(PlayerEditorTests
     src/audio_clip.cpp
     src/player.cpp
     src/wav_io.cpp
-    src/ffmpeg.cpp)
+    src/ffmpeg.cpp
+    src/video_reader.cpp)
 target_include_directories(PlayerEditorTests PRIVATE ${miniaudio_SOURCE_DIR} src)
 if (MSVC)
     target_compile_options(PlayerEditorTests PRIVATE /utf-8)

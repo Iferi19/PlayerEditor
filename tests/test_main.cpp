@@ -7,6 +7,7 @@
 #include "join.h"
 #include "spectrum.h"
 #include "biquad.h"
+#include "video_reader.h"
 
 #include <chrono>
 #include <cmath>
@@ -404,6 +405,61 @@ int main()
         double measured = 20.0 * std::log10(peakOut / 0.5);
         check("bq process: matches frequency response", std::fabs(measured - predicted) < 1.0,
               "measured=" + std::to_string(measured) + " predicted=" + std::to_string(predicted));
+    }
+
+    // 13) 動画対応 (テスト動画が build/ にあれば)
+    {
+        const std::string vid = "D:/PlayerEditor/build/pe_test_video.mp4";
+        std::ifstream vf(vid);
+        if (vf.good() && Ffmpeg::available())
+        {
+            auto si = Ffmpeg::probe(vid);
+            check("video: probe 320x240", si.hasVideo && si.width == 320 && si.height == 240,
+                  std::to_string(si.width) + "x" + std::to_string(si.height));
+            check("video: probe fps ~10", std::fabs(si.fps - 10.0) < 0.5, "fps=" + std::to_string(si.fps));
+            check("video: probe audio 44100", si.hasAudio && si.sampleRate == 44100,
+                  "sr=" + std::to_string(si.sampleRate));
+
+            // 動画から音声抽出(AudioClip の ffmpeg フォールバック)
+            AudioClip vc;
+            bool aok = AudioClip::load(vid, vc, err);
+            check("video: audio decodes", aok, err);
+            if (aok)
+                check("video: audio duration ~2s", std::fabs(vc.duration() - 2.0) < 0.15,
+                      "dur=" + std::to_string(vc.duration()));
+
+            // ストリーミングリーダー: フレームが取れて中身がある
+            VideoReader vr;
+            check("video: reader starts", vr.start(vid, 0.0, 320, 240, si.fps), "");
+            VideoReader::Frame fr;
+            bool got = false;
+            for (int i = 0; i < 200 && !got; i++)
+            {
+                got = vr.popFirst(fr);
+                if (!got) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            check("video: first frame size", got && fr.rgb.size() == 320u * 240u * 3u,
+                  "size=" + std::to_string(fr.rgb.size()));
+            bool nonzero = false;
+            for (size_t i = 0; i < fr.rgb.size(); i += 997)
+                if (fr.rgb[i] > 10) { nonzero = true; break; }
+            check("video: frame has content", got && nonzero, "");
+            check("video: first pts = start", got && std::fabs(fr.pts - 0.0) < 1e-6,
+                  "pts=" + std::to_string(fr.pts));
+            vr.stop();
+
+            // 映像ごと切り出し(再エンコードなし)
+            std::string cutOut = "D:/PlayerEditor/build/pe_cut.mp4";
+            std::remove(cutOut.c_str());
+            bool cok = Ffmpeg::cutVideoCopy(vid, cutOut, 0.5, 1.5, err);
+            check("video: cut copy ok", cok, err);
+            AudioClip cc;
+            if (cok && AudioClip::load(cutOut, cc, err))
+                check("video: cut duration ~1s", std::fabs(cc.duration() - 1.0) < 0.35,
+                      "dur=" + std::to_string(cc.duration()));   // キーフレーム精度なので緩め
+            std::remove(cutOut.c_str());
+        }
+        else std::printf("[SKIP] video tests (pe_test_video.mp4 not present)\n");
     }
 
     std::printf("\n%s\n", g_fail == 0 ? "=> ALL PASS" : ("=> " + std::to_string(g_fail) + " FAILED").c_str());

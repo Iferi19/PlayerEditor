@@ -1,6 +1,7 @@
 #include "audio_clip.h"
 #include "miniaudio.h"
 #include "platform_utf8.h"
+#include "ffmpeg.h"
 #include <cmath>
 
 double AudioClip::samplePeakDb() const
@@ -37,6 +38,22 @@ bool AudioClip::load(const std::string& path, AudioClip& out, std::string& err)
 #endif
     if (initR != MA_SUCCESS)
     {
+        // miniaudio が読めない形式(動画コンテナ等)は ffmpeg でデコード
+        if (Ffmpeg::available())
+        {
+            PcmData pcm;
+            std::string ferr;
+            if (Ffmpeg::decodeAudio(path, pcm, ferr))
+            {
+                out.samples = std::move(pcm.samples);
+                out.channels = pcm.channels;
+                out.sampleRate = pcm.sampleRate;
+                out.path = path;
+                if (!out.samples.empty() && out.channels > 0 && out.sampleRate > 0) return true;
+            }
+            err = "デコードできませんでした: " + ferr;
+            return false;
+        }
         err = "デコードを初期化できませんでした（未対応の形式かもしれません）。";
         return false;
     }

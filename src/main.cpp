@@ -15,6 +15,11 @@
 #include "analysis.h"
 #include "join.h"
 #include "spectrum.h"
+#include "video_reader.h"
+
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -87,6 +92,16 @@ struct Doc
     bool specAvgComputing = false;
     std::vector<float> avgSpecBins;   // 計算結果(binごとのdB)。空=未計算
 
+    // 映像(動画ファイルの場合)
+    bool hasVideo = false;
+    int srcW = 0, srcH = 0;      // 元解像度
+    int vidW = 0, vidH = 0;      // デコード出力(縮小後)
+    double vidFps = 0;
+    VideoReader vreader;
+    unsigned int tex = 0;        // GLテクスチャ(0=未作成)
+    double lastPts = -1;         // 最後に表示したフレームのpts(-1=未表示)
+    bool wantPoster = false;     // シーク直後: 次の1枚を即表示
+
     bool dragging = false;
     float downX = 0;
 };
@@ -111,6 +126,7 @@ struct App
     int exportSrIdx = 0;            // 0=元のまま
     int exportBitIdx = 0;           // 0=自動
     int exportPreset = 0;           // 0=カスタム
+    bool exportVideoCopy = false;   // 動画: 映像ごと切り出し(再エンコードなし)
     bool wantExport = false;
 
     // 加工(エフェクト)設定
@@ -405,6 +421,35 @@ static void doExport(App& a)
     long long s = 0, e = d->clip.frameCount();
     bool useSel = a.exportUseSelection && d->selStart >= 0 && d->selEnd > d->selStart;
     if (useSel) { s = d->selStart; e = d->selEnd; }
+
+    // 映像ごと切り出し(再エンコードなし、キーフレーム精度)
+    if (a.exportVideoCopy && d->hasVideo)
+    {
+        std::string srcExt = "mp4";
+        auto sdot = d->clip.path.find_last_of('.');
+        if (sdot != std::string::npos) srcExt = d->clip.path.substr(sdot + 1);
+
+        std::string nm = d->name;
+        auto ndot = nm.find_last_of('.');
+        if (ndot != std::string::npos) nm = nm.substr(0, ndot);
+
+        auto out = pfd::save_file("映像ごと切り出し", nm + "_cut." + srcExt,
+            { "動画", "*." + srcExt }).result();
+        if (out.empty()) return;
+
+        double t0 = s / (double)d->clip.sampleRate;
+        double t1 = e / (double)d->clip.sampleRate;
+        std::string err;
+        if (Ffmpeg::cutVideoCopy(d->clip.path, out, t0, t1, err))
+        {
+            char buf[300];
+            std::snprintf(buf, sizeof(buf), "映像ごと切り出し完了: %s (%.2f-%.2fs, 再エンコードなし)",
+                          baseName(out).c_str(), t0, t1);
+            d->loudText = buf;
+        }
+        else d->loudText = err;
+        return;
+    }
 
     double gain = 0.0;
     if (a.exportNormalize)
@@ -886,6 +931,15 @@ static void drawExportPopup(App& a)
     ImGui::EndDisabled();
     if (!hasSel) a.exportUseSelection = false;
 
+    if (d->hasVideo)
+    {
+        ImGui::Checkbox("映像ごと切り出し(再エンコードなし)", &a.exportVideoCopy);
+        if (a.exportVideoCopy)
+            ImGui::TextDisabled("※ ストリームコピー。開始点はキーフレーム精度、正規化・形式変換は適用されません。");
+    }
+    else a.exportVideoCopy = false;
+
+    ImGui::BeginDisabled(a.exportVideoCopy);
     ImGui::Checkbox("ラウドネス正規化", &a.exportNormalize);
     ImGui::SameLine();
     ImGui::BeginDisabled(!a.exportNormalize);
@@ -900,6 +954,7 @@ static void drawExportPopup(App& a)
     ImGui::BeginDisabled(!bitApplies);
     ImGui::Combo("ビット深度", &a.exportBitIdx, kBitItems, IM_ARRAYSIZE(kBitItems));
     ImGui::EndDisabled();
+    ImGui::EndDisabled();   // exportVideoCopy
 
     ImGui::SeparatorText("曲情報（タグ）");
     ImGui::InputText("タイトル", &d->tags.title);
@@ -965,6 +1020,25 @@ static bool addDocNoPlay(App& a, const std::string& path)
     doc->clip = std::move(c);
     doc->name = baseName(path);
     doc->tags = Ffmpeg::readTags(path);   // 入力に埋まっている曲情報を流用(無ければ空)
+
+    // 映像ストリームがあれば映像ペインを有効化(縮小デコードで負荷を抑える)
+    if (Ffmpeg::available())
+    {
+        auto si = Ffmpeg::probe(path);
+        if (si.hasVideo)
+        {
+            doc->hasVideo = true;
+            doc->srcW = si.width;
+            doc->srcH = si.height;
+            doc->vidFps = si.fps;
+            int outW = std::min(960, si.width);
+            int outH = (int)((long long)si.height * outW / si.width);
+            if (outH < 2) outH = 2;
+            doc->vidW = outW - (outW % 2);
+            doc->vidH = outH - (outH % 2);
+        }
+    }
+
     a.docs.push_back(std::move(doc));
     a.active = (int)a.docs.size() - 1;
     a.pendingSelect = a.active;           // プログラム起因の選択(タブ切替停止を抑止)
@@ -985,7 +1059,12 @@ static void closeDoc(App& a, int i)
 {
     if (i < 0 || i >= (int)a.docs.size()) return;
     a.player.stop();
-    a.docs.erase(a.docs.begin() + i);
+    if (a.docs[i]->tex)
+    {
+        GLuint t = a.docs[i]->tex;
+        glDeleteTextures(1, &t);
+    }
+    a.docs.erase(a.docs.begin() + i);   // VideoReader はデストラクタで停止
     if (a.docs.empty()) a.active = -1;
     else if (a.active >= (int)a.docs.size()) a.active = (int)a.docs.size() - 1;
     else if (i < a.active) a.active--;
@@ -1006,6 +1085,92 @@ static void dropCallback(GLFWwindow* w, int count, const char** paths)
     std::vector<std::string> v;
     for (int i = 0; i < count; i++) v.emplace_back(paths[i]);
     openFiles(*a, v);
+}
+
+// ---- 映像: 音声クロック同期 ----
+
+static void uploadVideoTexture(Doc& d, const VideoReader::Frame& f)
+{
+    if (!d.tex)
+    {
+        GLuint t = 0;
+        glGenTextures(1, &t);
+        d.tex = t;
+        glBindTexture(GL_TEXTURE_2D, d.tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+    glBindTexture(GL_TEXTURE_2D, d.tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, d.vidW, d.vidH, 0, GL_RGB, GL_UNSIGNED_BYTE, f.rgb.data());
+}
+
+// 毎フレーム: 音声位置に合わせて映像フレームを進める。シーク/ループは自動で再スポーン。
+static void updateVideo(App& a)
+{
+    Doc* d = curDoc(a);
+    if (!d || !d->hasVideo) return;
+
+    double audioT = d->playhead / (double)d->clip.sampleRate;
+
+    bool needRestart = false;
+    if (!d->vreader.running() && d->lastPts < 0) needRestart = true;                     // 初回/切替復帰
+    else if (d->lastPts >= 0 && (audioT < d->lastPts - 0.3 || audioT > d->lastPts + 1.0))
+        needRestart = true;                                                              // シーク/ループ検出
+
+    if (needRestart)
+    {
+        d->vreader.start(d->clip.path, audioT, d->vidW, d->vidH, d->vidFps);
+        d->wantPoster = true;
+        d->lastPts = audioT;   // 再スポーン直後の再検出を防ぐ
+    }
+
+    VideoReader::Frame f;
+    bool got = false;
+    if (d->wantPoster)
+    {
+        got = d->vreader.popFirst(f);
+        if (got) d->wantPoster = false;
+    }
+    else if (a.player.isPlaying())
+    {
+        got = d->vreader.popUpTo(audioT + 0.02, f);
+    }
+
+    if (got)
+    {
+        uploadVideoTexture(*d, f);
+        d->lastPts = f.pts;
+    }
+}
+
+static void drawVideoPane(Doc& d, ImVec2 size)
+{
+    ImVec2 p0 = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("video", size);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 p1(p0.x + size.x, p0.y + size.y);
+    dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 255));
+
+    if (d.tex && d.vidW > 0 && d.vidH > 0)
+    {
+        // アスペクト維持でレターボックス
+        float srcAspect = (float)d.vidW / d.vidH;
+        float dstAspect = size.x / size.y;
+        float w, h;
+        if (srcAspect > dstAspect) { w = size.x; h = size.x / srcAspect; }
+        else { h = size.y; w = size.y * srcAspect; }
+        ImVec2 r0(p0.x + (size.x - w) * 0.5f, p0.y + (size.y - h) * 0.5f);
+        ImVec2 r1(r0.x + w, r0.y + h);
+        dl->AddImage((ImTextureID)(intptr_t)d.tex, r0, r1);
+    }
+    else
+    {
+        dl->AddText(ImVec2(p0.x + 14, p0.y + size.y * 0.5f - 9),
+                    IM_COL32(150, 150, 150, 255), "映像を読み込み中…");
+    }
 }
 
 static void drawWaveform(App& a, Doc& d, ImVec2 size)
@@ -1100,6 +1265,12 @@ static void drawTabs(App& a)
     if (newActive == a.pendingSelect) a.pendingSelect = -1;   // 選択が追いついたら解除
     if (newActive != a.active)
     {
+        // 切替元の映像デコーダは止める(戻ってきたら再スポーン)
+        if (Doc* od = curDoc(a); od && od->hasVideo)
+        {
+            od->vreader.stop();
+            od->lastPts = -1;
+        }
         a.active = newActive;
         if (!programmatic) startPlayback(a);  // ユーザーのタブ切替 → 切替先を即再生（排他）
     }
@@ -1190,7 +1361,21 @@ static void drawUI(App& a)
     float panelW = (a.showAnalysis && d) ? 320.0f : 0.0f;
     if (d)
     {
-        drawWaveform(a, *d, ImVec2(avail.x - panelW, waveH));
+        float mainW = avail.x - panelW;
+        if (d->hasVideo)
+        {
+            // 映像 + 波形の縦分割(波形は下段固定高さ)
+            float wvH = std::min(170.0f, waveH * 0.45f);
+            float videoH = std::max(100.0f, waveH - wvH);
+            ImGui::BeginGroup();
+            drawVideoPane(*d, ImVec2(mainW, videoH));
+            drawWaveform(a, *d, ImVec2(mainW, waveH - videoH));
+            ImGui::EndGroup();
+        }
+        else
+        {
+            drawWaveform(a, *d, ImVec2(mainW, waveH));
+        }
         if (panelW > 0)
         {
             ImGui::SameLine(0, 0);
@@ -1224,8 +1409,11 @@ static void drawUI(App& a)
         char norm[64] = "";
         if (a.normPlayback && d->loudValid)
             std::snprintf(norm, sizeof(norm), "   [再生 %+.1f dB]", d->playbackGainDb);
-        std::snprintf(info, sizeof(info), "%s   |   %d Hz / %dch   |   長さ %.2fs   |   位置 %.2fs%s%s",
-            d->name.c_str(), d->clip.sampleRate, d->clip.channels, d->clip.duration(), pos, sel, norm);
+        char vid[64] = "";
+        if (d->hasVideo)
+            std::snprintf(vid, sizeof(vid), "   |   映像 %dx%d %.3g fps", d->srcW, d->srcH, d->vidFps);
+        std::snprintf(info, sizeof(info), "%s   |   %d Hz / %dch   |   長さ %.2fs   |   位置 %.2fs%s%s%s",
+            d->name.c_str(), d->clip.sampleRate, d->clip.channels, d->clip.duration(), pos, vid, sel, norm);
         ImGui::TextUnformatted(info);
         if (!d->loudText.empty())
             ImGui::TextColored(ImVec4(0.62f, 0.82f, 0.98f, 1.0f), "%s", d->loudText.c_str());
@@ -1368,6 +1556,7 @@ int main(int argc, char** argv)
         if (Doc* d = curDoc(app))
             if (app.player.isPlaying()) d->playhead = app.player.positionFrame();
         pollMeasure(app);
+        updateVideo(app);
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
