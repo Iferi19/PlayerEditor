@@ -125,8 +125,9 @@ struct App
 
     // 映像コントロールバー
     bool showVideoWave = false;   // 動画タブの波形(デフォルト非表示)
-    double lastMouseMove = 0;     // 全画面時の自動非表示用
+    double lastMouseMove = 0;     // 自動非表示用
     bool seekWasPlaying = false;  // シークバー操作前の再生状態
+    bool videoTrimMode = false;   // フォト風トリム(シークバーにハンドル表示)
 
     // 書き出し設定
     int exportFmt = 0;              // kFormats のインデックス
@@ -1002,8 +1003,11 @@ static void startPlayback(App& a)
     if (!d) return;
     applyPlaybackGain(a);
     a.player.setLoop(a.loop);
-    auto [s, e] = region(*d);
     bool hasSel = (d->selStart >= 0 && d->selEnd > d->selStart);
+    // 最後まで再生済みなら先頭へ戻して再生(終端から始まって無音になるのを防ぐ)
+    if (!hasSel && d->playhead >= d->clip.frameCount() - 1)
+        d->playhead = 0;
+    auto [s, e] = region(*d);
     // ループ戻り先: 選択があれば選択先頭、なければ曲頭(途中から再生してもループは最初へ)
     a.player.play(d->clip, s, e, hasSel ? s : 0);
 }
@@ -1205,6 +1209,7 @@ static void drawVideoControls(App& a, Doc& d, ImVec2 p0, ImVec2 p1)
     float sx0 = p0.x + 14, sx1 = p1.x - 14;
     float sy = b0.y + 10;
     ImGui::SetCursorScreenPos(ImVec2(sx0, sy - 7));
+    ImGui::SetNextItemAllowOverlap();   // トリムハンドルを上に重ねる
     ImGui::InvisibleButton("seek", ImVec2(sx1 - sx0, 14));
     bool seekHover = ImGui::IsItemHovered() || ImGui::IsItemActive();
 
@@ -1234,6 +1239,51 @@ static void drawVideoControls(App& a, Doc& d, ImVec2 p0, ImVec2 p1)
     dl->AddLine(ImVec2(sx0, sy), ImVec2(px, sy), IM_COL32(78, 201, 176, 255), th + 1);
     dl->AddCircleFilled(ImVec2(px, sy), seekHover ? 7.0f : 5.0f, IM_COL32(78, 201, 176, 255));
 
+    // ---- トリムモード: フォト風の開始/終了ハンドル ----
+    if (a.videoTrimMode && frames > 0)
+    {
+        long long selS = (d.selStart >= 0 && d.selEnd > d.selStart) ? d.selStart : 0;
+        long long selE = (d.selStart >= 0 && d.selEnd > d.selStart) ? d.selEnd : frames;
+        long long minGap = std::max<long long>(1, frames / 200);   // 最小幅0.5%
+
+        auto fToX = [&](long long f) { return sx0 + (float)((double)f / frames) * (sx1 - sx0); };
+        auto xToF = [&](float x) {
+            double t = std::clamp((x - sx0) / std::max(1.0f, sx1 - sx0), 0.0f, 1.0f);
+            return (long long)(t * frames);
+        };
+
+        // 範囲外を暗く + 範囲を強調
+        dl->AddRectFilled(ImVec2(sx0, sy - 5), ImVec2(fToX(selS), sy + 5), IM_COL32(0, 0, 0, 140));
+        dl->AddRectFilled(ImVec2(fToX(selE), sy - 5), ImVec2(sx1, sy + 5), IM_COL32(0, 0, 0, 140));
+        dl->AddLine(ImVec2(fToX(selS), sy), ImVec2(fToX(selE), sy), IM_COL32(78, 201, 176, 255), th + 3);
+
+        // ハンドル(左右)。ドラッグで選択範囲を編集(既存の書き出し/切り出しにそのまま反映)
+        struct HandleDef { const char* id; bool isStart; };
+        for (const HandleDef& hd : { HandleDef{"trimL", true}, HandleDef{"trimR", false} })
+        {
+            long long f = hd.isStart ? selS : selE;
+            float hx = fToX(f);
+            ImGui::SetCursorScreenPos(ImVec2(hx - 7, sy - 15));
+            ImGui::InvisibleButton(hd.id, ImVec2(14, 30));
+            bool act = ImGui::IsItemActive();
+            if (act)
+            {
+                long long nf = xToF(ImGui::GetIO().MousePos.x);
+                if (hd.isStart) selS = std::min(nf, selE - minGap);
+                else            selE = std::max(nf, selS + minGap);
+                selS = std::max<long long>(0, selS);
+                selE = std::min(selE, frames);
+                d.selStart = selS;
+                d.selEnd = selE;
+            }
+            ImU32 hcol = (act || ImGui::IsItemHovered()) ? IM_COL32(120, 230, 205, 255)
+                                                         : IM_COL32(78, 201, 176, 255);
+            float hx2 = fToX(hd.isStart ? selS : selE);
+            dl->AddRectFilled(ImVec2(hx2 - 4, sy - 13), ImVec2(hx2 + 4, sy + 13), hcol, 3.0f);
+            dl->AddLine(ImVec2(hx2, sy - 8), ImVec2(hx2, sy + 8), IM_COL32(10, 30, 26, 255), 1.5f);
+        }
+    }
+
     // ---- 再生/一時停止ボタン ----
     float by = b0.y + 22;
     ImGui::SetCursorScreenPos(ImVec2(p0.x + 14, by));
@@ -1258,6 +1308,21 @@ static void drawVideoControls(App& a, Doc& d, ImVec2 p0, ImVec2 p1)
     fmtTime(dur, tot, sizeof(tot));
     std::snprintf(tim, sizeof(tim), "%s / %s", cur, tot);
     dl->AddText(ImVec2(p0.x + 50, by + 3), IM_COL32(255, 255, 255, 220), tim);
+
+    // ---- トリムボタン(フォト風ハンドルの表示切替) ----
+    {
+        float tx = p1.x - 40 - 62;
+        ImGui::SetCursorScreenPos(ImVec2(tx, by));
+        ImGui::InvisibleButton("trimbtn", ImVec2(54, 24));
+        if (ImGui::IsItemClicked())
+        {
+            a.videoTrimMode = !a.videoTrimMode;
+            if (!a.videoTrimMode) { d.selStart = d.selEnd = -1; }   // OFFで範囲解除
+        }
+        ImU32 tcol = a.videoTrimMode ? IM_COL32(78, 201, 176, 255)
+                   : IM_COL32(255, 255, 255, ImGui::IsItemHovered() ? 255 : 210);
+        dl->AddText(ImVec2(tx + 6, by + 3), tcol, "トリム");
+    }
 
     // ---- 全画面ボタン(コーナー矢印アイコン) ----
     float fx = p1.x - 40;
@@ -1304,20 +1369,27 @@ static void drawVideoPane(App& a, Doc& d, ImVec2 size)
     ImGui::InvisibleButton("video", size);
     ImVec2 p1(p0.x + size.x, p0.y + size.y);
 
-    // コントロールバーの表示判定(ホバー / 全画面はマウス静止2.5秒で隠す / 停止中は常時)
+    // コントロールバーの表示判定:
+    // ペイン内でカーソルが動いた直後 / バー上に置いている間 / ドラッグ操作中 は表示。
+    // カーソル静止2.5秒 or ペイン外で自動的に隠れる。
     ImGuiIO& io = ImGui::GetIO();
     double now = ImGui::GetTime();
     if (io.MouseDelta.x != 0 || io.MouseDelta.y != 0) a.lastMouseMove = now;
     bool hoverPane = ImGui::IsMouseHoveringRect(p0, p1);
-    bool showCtl = !a.player.isPlaying()
-                || (!a.fullscreen && hoverPane)
-                || (a.fullscreen && now - a.lastMouseMove < 2.5);
-
-    // ダブルクリックで全画面切替(コントロールバー領域は除外)
     const float barH = 48.0f;
-    bool inBar = showCtl && io.MousePos.y > p1.y - barH;
-    if (ImGui::IsItemHovered() && !inBar && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
-        toggleFullscreen(a);
+    bool inBarArea = hoverPane && io.MousePos.y > p1.y - barH;
+    bool showCtl = (hoverPane || a.fullscreen)
+                && (now - a.lastMouseMove < 2.5 || inBarArea || ImGui::IsMouseDown(ImGuiMouseButton_Left));
+
+    // クリックで再生/一時停止、ダブルクリックで全画面(いずれもバー領域は除外)
+    bool inBar = showCtl && inBarArea;
+    if (ImGui::IsItemHovered() && !inBar)
+    {
+        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+            toggleFullscreen(a);
+        else if (ImGui::IsItemClicked(ImGuiMouseButton_Left))
+            togglePlay(a);
+    }
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 255));
