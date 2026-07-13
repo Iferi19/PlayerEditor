@@ -1252,10 +1252,10 @@ static void drawVideoControls(App& a, Doc& d, ImVec2 p0, ImVec2 p1)
             return (long long)(t * frames);
         };
 
-        // 範囲外を暗く + 範囲を強調
+        // 範囲外を暗く + 範囲を強調(トリム系はオレンジ: 再生位置のティール丸と区別)
         dl->AddRectFilled(ImVec2(sx0, sy - 5), ImVec2(fToX(selS), sy + 5), IM_COL32(0, 0, 0, 140));
         dl->AddRectFilled(ImVec2(fToX(selE), sy - 5), ImVec2(sx1, sy + 5), IM_COL32(0, 0, 0, 140));
-        dl->AddLine(ImVec2(fToX(selS), sy), ImVec2(fToX(selE), sy), IM_COL32(78, 201, 176, 255), th + 3);
+        dl->AddLine(ImVec2(fToX(selS), sy), ImVec2(fToX(selE), sy), IM_COL32(242, 166, 76, 220), th + 3);
 
         // ハンドル(左右)。ドラッグで選択範囲を編集(既存の書き出し/切り出しにそのまま反映)
         struct HandleDef { const char* id; bool isStart; };
@@ -1276,11 +1276,11 @@ static void drawVideoControls(App& a, Doc& d, ImVec2 p0, ImVec2 p1)
                 d.selStart = selS;
                 d.selEnd = selE;
             }
-            ImU32 hcol = (act || ImGui::IsItemHovered()) ? IM_COL32(120, 230, 205, 255)
-                                                         : IM_COL32(78, 201, 176, 255);
+            ImU32 hcol = (act || ImGui::IsItemHovered()) ? IM_COL32(255, 200, 120, 255)
+                                                         : IM_COL32(242, 166, 76, 255);
             float hx2 = fToX(hd.isStart ? selS : selE);
             dl->AddRectFilled(ImVec2(hx2 - 4, sy - 13), ImVec2(hx2 + 4, sy + 13), hcol, 3.0f);
-            dl->AddLine(ImVec2(hx2, sy - 8), ImVec2(hx2, sy + 8), IM_COL32(10, 30, 26, 255), 1.5f);
+            dl->AddLine(ImVec2(hx2, sy - 8), ImVec2(hx2, sy + 8), IM_COL32(60, 35, 10, 255), 1.5f);
         }
     }
 
@@ -1319,7 +1319,7 @@ static void drawVideoControls(App& a, Doc& d, ImVec2 p0, ImVec2 p1)
             a.videoTrimMode = !a.videoTrimMode;
             if (!a.videoTrimMode) { d.selStart = d.selEnd = -1; }   // OFFで範囲解除
         }
-        ImU32 tcol = a.videoTrimMode ? IM_COL32(78, 201, 176, 255)
+        ImU32 tcol = a.videoTrimMode ? IM_COL32(242, 166, 76, 255)
                    : IM_COL32(255, 255, 255, ImGui::IsItemHovered() ? 255 : 210);
         dl->AddText(ImVec2(tx + 6, by + 3), tcol, "トリム");
     }
