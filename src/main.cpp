@@ -118,6 +118,11 @@ struct App
     bool showAnalysis = false;  // 解析サイドパネル表示
     int monitorIdx = 0;         // モニターシミュレーション(kMonitors)
 
+    // 全画面(YouTube方式: ダブルクリック/Fで切替、Escで復帰)
+    GLFWwindow* window = nullptr;
+    bool fullscreen = false;
+    int savedX = 0, savedY = 0, savedW = 0, savedH = 0;
+
     // 書き出し設定
     int exportFmt = 0;              // kFormats のインデックス
     bool exportUseSelection = false;
@@ -1146,10 +1151,35 @@ static void updateVideo(App& a)
     }
 }
 
-static void drawVideoPane(Doc& d, ImVec2 size)
+// 全画面(モニターフルスクリーン)のトグル。YouTubeのダブルクリック/F/Escと同じ操作感。
+static void toggleFullscreen(App& a)
+{
+    if (!a.window) return;
+    if (!a.fullscreen)
+    {
+        glfwGetWindowPos(a.window, &a.savedX, &a.savedY);
+        glfwGetWindowSize(a.window, &a.savedW, &a.savedH);
+        GLFWmonitor* mon = glfwGetPrimaryMonitor();
+        const GLFWvidmode* mode = glfwGetVideoMode(mon);
+        glfwSetWindowMonitor(a.window, mon, 0, 0, mode->width, mode->height, mode->refreshRate);
+        a.fullscreen = true;
+    }
+    else
+    {
+        glfwSetWindowMonitor(a.window, nullptr, a.savedX, a.savedY, a.savedW, a.savedH, 0);
+        a.fullscreen = false;
+    }
+}
+
+static void drawVideoPane(App& a, Doc& d, ImVec2 size)
 {
     ImVec2 p0 = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton("video", size);
+
+    // ダブルクリックで全画面切替(YouTube方式)
+    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+        toggleFullscreen(a);
+
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 p1(p0.x + size.x, p0.y + size.y);
     dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 255));
@@ -1170,6 +1200,16 @@ static void drawVideoPane(Doc& d, ImVec2 size)
     {
         dl->AddText(ImVec2(p0.x + 14, p0.y + size.y * 0.5f - 9),
                     IM_COL32(150, 150, 150, 255), "映像を読み込み中…");
+    }
+
+    // 全画面中のオーバーレイ(操作ヒント + 位置)
+    if (a.fullscreen)
+    {
+        double pos = d.playhead / (double)d.clip.sampleRate;
+        char ov[128];
+        std::snprintf(ov, sizeof(ov), "%.1fs / %.1fs   |   Space: 再生/停止   F/Esc/ダブルクリック: 全画面解除",
+                      pos, d.clip.duration());
+        dl->AddText(ImVec2(p0.x + 16, p1.y - 30), IM_COL32(255, 255, 255, 150), ov);
     }
 }
 
@@ -1234,6 +1274,13 @@ static void drawWaveform(App& a, Doc& d, ImVec2 size)
 static void handleShortcuts(App& a)
 {
     if (ImGui::IsKeyPressed(ImGuiKey_Space, false)) togglePlay(a);
+
+    // 全画面: F で切替(映像タブのみ)、Esc で解除
+    Doc* d = curDoc(a);
+    if (ImGui::IsKeyPressed(ImGuiKey_F, false) && d && d->hasVideo && !ImGui::GetIO().WantTextInput)
+        toggleFullscreen(a);
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && a.fullscreen)
+        toggleFullscreen(a);
 }
 
 static void drawTabs(App& a)
@@ -1290,6 +1337,15 @@ static void drawUI(App& a)
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
     ImGui::PopStyleVar();
+
+    // ---- 全画面モード: 映像のみを画面いっぱいに ----
+    if (a.fullscreen && d && d->hasVideo)
+    {
+        drawVideoPane(a, *d, vp->WorkSize);
+        ImGui::End();
+        return;
+    }
+    if (a.fullscreen) toggleFullscreen(a);   // 映像タブでなくなったら自動復帰
 
     // ---- ツールバー ----
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.19f, 0.20f, 0.22f, 1.0f));
@@ -1368,7 +1424,7 @@ static void drawUI(App& a)
             float wvH = std::min(170.0f, waveH * 0.45f);
             float videoH = std::max(100.0f, waveH - wvH);
             ImGui::BeginGroup();
-            drawVideoPane(*d, ImVec2(mainW, videoH));
+            drawVideoPane(a, *d, ImVec2(mainW, videoH));
             drawWaveform(a, *d, ImVec2(mainW, waveH - videoH));
             ImGui::EndGroup();
         }
@@ -1536,6 +1592,7 @@ int main(int argc, char** argv)
     ImGui_ImplOpenGL3_Init("#version 130");
 
     App app;
+    app.window = win;
     glfwSetWindowUserPointer(win, &app);
     glfwSetDropCallback(win, dropCallback);
 
