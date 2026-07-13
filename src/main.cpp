@@ -123,6 +123,11 @@ struct App
     bool fullscreen = false;
     int savedX = 0, savedY = 0, savedW = 0, savedH = 0;
 
+    // 映像コントロールバー
+    bool showVideoWave = false;   // 動画タブの波形(デフォルト非表示)
+    double lastMouseMove = 0;     // 全画面時の自動非表示用
+    bool seekWasPlaying = false;  // シークバー操作前の再生状態
+
     // 書き出し設定
     int exportFmt = 0;              // kFormats のインデックス
     bool exportUseSelection = false;
@@ -1171,17 +1176,147 @@ static void toggleFullscreen(App& a)
     }
 }
 
+static void togglePlay(App& a);   // 前方宣言(コントロールバーから使う)
+
+static void fmtTime(double t, char* out, size_t n)
+{
+    int s = (int)(t + 0.5);
+    if (s >= 3600) std::snprintf(out, n, "%d:%02d:%02d", s / 3600, (s / 60) % 60, s % 60);
+    else std::snprintf(out, n, "%d:%02d", s / 60, s % 60);
+}
+
+// YouTube風コントロールバー(シークバー / 再生・一時停止 / 時間 / 全画面ボタン)
+static void drawVideoControls(App& a, Doc& d, ImVec2 p0, ImVec2 p1)
+{
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float barH = 48.0f;
+    ImVec2 b0(p0.x, p1.y - barH);
+
+    // 下に向かって暗くなるグラデーション
+    dl->AddRectFilledMultiColor(b0, p1,
+        IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 0),
+        IM_COL32(0, 0, 0, 190), IM_COL32(0, 0, 0, 190));
+
+    long long frames = d.clip.frameCount();
+    double dur = d.clip.duration();
+    int sr = d.clip.sampleRate;
+
+    // ---- シークバー ----
+    float sx0 = p0.x + 14, sx1 = p1.x - 14;
+    float sy = b0.y + 10;
+    ImGui::SetCursorScreenPos(ImVec2(sx0, sy - 7));
+    ImGui::InvisibleButton("seek", ImVec2(sx1 - sx0, 14));
+    bool seekHover = ImGui::IsItemHovered() || ImGui::IsItemActive();
+
+    if (ImGui::IsItemActivated())
+    {
+        a.seekWasPlaying = a.player.isPlaying();
+        a.player.stop();
+    }
+    if (ImGui::IsItemActive())
+    {
+        float t = std::clamp((ImGui::GetIO().MousePos.x - sx0) / std::max(1.0f, sx1 - sx0), 0.0f, 1.0f);
+        d.playhead = (long long)(t * frames);
+    }
+    if (ImGui::IsItemDeactivated() && a.seekWasPlaying)
+    {
+        // 掴んで離したら続きから再生(YouTube方式)
+        applyPlaybackGain(a);
+        a.player.setLoop(a.loop);
+        a.player.play(d.clip, d.playhead, frames, 0);
+        a.seekWasPlaying = false;
+    }
+
+    float frac = frames > 0 ? (float)((double)d.playhead / frames) : 0.0f;
+    float px = sx0 + frac * (sx1 - sx0);
+    float th = seekHover ? 3.0f : 2.0f;
+    dl->AddLine(ImVec2(sx0, sy), ImVec2(sx1, sy), IM_COL32(255, 255, 255, 70), th + 1);
+    dl->AddLine(ImVec2(sx0, sy), ImVec2(px, sy), IM_COL32(78, 201, 176, 255), th + 1);
+    dl->AddCircleFilled(ImVec2(px, sy), seekHover ? 7.0f : 5.0f, IM_COL32(78, 201, 176, 255));
+
+    // ---- 再生/一時停止ボタン ----
+    float by = b0.y + 22;
+    ImGui::SetCursorScreenPos(ImVec2(p0.x + 14, by));
+    ImGui::InvisibleButton("pp", ImVec2(26, 24));
+    if (ImGui::IsItemClicked()) togglePlay(a);
+    ImU32 icoCol = IM_COL32(255, 255, 255, ImGui::IsItemHovered() ? 255 : 210);
+    ImVec2 ic(p0.x + 14, by);
+    if (a.player.isPlaying())
+    {
+        dl->AddRectFilled(ImVec2(ic.x + 4, ic.y + 3), ImVec2(ic.x + 10, ic.y + 21), icoCol);
+        dl->AddRectFilled(ImVec2(ic.x + 15, ic.y + 3), ImVec2(ic.x + 21, ic.y + 21), icoCol);
+    }
+    else
+    {
+        dl->AddTriangleFilled(ImVec2(ic.x + 5, ic.y + 2), ImVec2(ic.x + 5, ic.y + 22),
+                              ImVec2(ic.x + 22, ic.y + 12), icoCol);
+    }
+
+    // ---- 時間表示 ----
+    char cur[16], tot[16], tim[40];
+    fmtTime(d.playhead / (double)sr, cur, sizeof(cur));
+    fmtTime(dur, tot, sizeof(tot));
+    std::snprintf(tim, sizeof(tim), "%s / %s", cur, tot);
+    dl->AddText(ImVec2(p0.x + 50, by + 3), IM_COL32(255, 255, 255, 220), tim);
+
+    // ---- 全画面ボタン(コーナー矢印アイコン) ----
+    float fx = p1.x - 40;
+    ImGui::SetCursorScreenPos(ImVec2(fx, by));
+    ImGui::InvisibleButton("fsbtn", ImVec2(26, 24));
+    if (ImGui::IsItemClicked()) toggleFullscreen(a);
+    ImU32 fsCol = IM_COL32(255, 255, 255, ImGui::IsItemHovered() ? 255 : 210);
+    {
+        float cx = fx + 3, cy = by + 3, sz = 6.0f, W = 20.0f, H = 18.0f;
+        float t2 = 2.0f;
+        if (!a.fullscreen)
+        {
+            // 外向き: 四隅のブラケット
+            dl->AddLine(ImVec2(cx, cy + sz), ImVec2(cx, cy), fsCol, t2);
+            dl->AddLine(ImVec2(cx, cy), ImVec2(cx + sz, cy), fsCol, t2);
+            dl->AddLine(ImVec2(cx + W - sz, cy), ImVec2(cx + W, cy), fsCol, t2);
+            dl->AddLine(ImVec2(cx + W, cy), ImVec2(cx + W, cy + sz), fsCol, t2);
+            dl->AddLine(ImVec2(cx, cy + H - sz), ImVec2(cx, cy + H), fsCol, t2);
+            dl->AddLine(ImVec2(cx, cy + H), ImVec2(cx + sz, cy + H), fsCol, t2);
+            dl->AddLine(ImVec2(cx + W - sz, cy + H), ImVec2(cx + W, cy + H), fsCol, t2);
+            dl->AddLine(ImVec2(cx + W, cy + H), ImVec2(cx + W, cy + H - sz), fsCol, t2);
+        }
+        else
+        {
+            // 内向き: 復帰アイコン
+            dl->AddLine(ImVec2(cx + sz, cy), ImVec2(cx + sz, cy + sz), fsCol, t2);
+            dl->AddLine(ImVec2(cx + sz, cy + sz), ImVec2(cx, cy + sz), fsCol, t2);
+            dl->AddLine(ImVec2(cx + W - sz, cy), ImVec2(cx + W - sz, cy + sz), fsCol, t2);
+            dl->AddLine(ImVec2(cx + W - sz, cy + sz), ImVec2(cx + W, cy + sz), fsCol, t2);
+            dl->AddLine(ImVec2(cx + sz, cy + H), ImVec2(cx + sz, cy + H - sz), fsCol, t2);
+            dl->AddLine(ImVec2(cx + sz, cy + H - sz), ImVec2(cx, cy + H - sz), fsCol, t2);
+            dl->AddLine(ImVec2(cx + W - sz, cy + H), ImVec2(cx + W - sz, cy + H - sz), fsCol, t2);
+            dl->AddLine(ImVec2(cx + W - sz, cy + H - sz), ImVec2(cx + W, cy + H - sz), fsCol, t2);
+        }
+    }
+}
+
 static void drawVideoPane(App& a, Doc& d, ImVec2 size)
 {
     ImVec2 p0 = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton("video", size);
+    ImVec2 p1(p0.x + size.x, p0.y + size.y);
 
-    // ダブルクリックで全画面切替(YouTube方式)
-    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+    // コントロールバーの表示判定(ホバー / 全画面はマウス静止2.5秒で隠す / 停止中は常時)
+    ImGuiIO& io = ImGui::GetIO();
+    double now = ImGui::GetTime();
+    if (io.MouseDelta.x != 0 || io.MouseDelta.y != 0) a.lastMouseMove = now;
+    bool hoverPane = ImGui::IsMouseHoveringRect(p0, p1);
+    bool showCtl = !a.player.isPlaying()
+                || (!a.fullscreen && hoverPane)
+                || (a.fullscreen && now - a.lastMouseMove < 2.5);
+
+    // ダブルクリックで全画面切替(コントロールバー領域は除外)
+    const float barH = 48.0f;
+    bool inBar = showCtl && io.MousePos.y > p1.y - barH;
+    if (ImGui::IsItemHovered() && !inBar && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
         toggleFullscreen(a);
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 p1(p0.x + size.x, p0.y + size.y);
     dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 255));
 
     if (d.tex && d.vidW > 0 && d.vidH > 0)
@@ -1202,15 +1337,7 @@ static void drawVideoPane(App& a, Doc& d, ImVec2 size)
                     IM_COL32(150, 150, 150, 255), "映像を読み込み中…");
     }
 
-    // 全画面中のオーバーレイ(操作ヒント + 位置)
-    if (a.fullscreen)
-    {
-        double pos = d.playhead / (double)d.clip.sampleRate;
-        char ov[128];
-        std::snprintf(ov, sizeof(ov), "%.1fs / %.1fs   |   Space: 再生/停止   F/Esc/ダブルクリック: 全画面解除",
-                      pos, d.clip.duration());
-        dl->AddText(ImVec2(p0.x + 16, p1.y - 30), IM_COL32(255, 255, 255, 150), ov);
-    }
+    if (showCtl) drawVideoControls(a, d, p0, p1);
 }
 
 static void drawWaveform(App& a, Doc& d, ImVec2 size)
@@ -1392,6 +1519,11 @@ static void drawUI(App& a)
     ImGui::SameLine();
     ImGui::Checkbox("解析", &a.showAnalysis);
     ImGui::SameLine();
+    if (d && d->hasVideo)
+    {
+        ImGui::Checkbox("波形", &a.showVideoWave);
+        ImGui::SameLine();
+    }
     if (ImGui::Button("加工…")) a.wantFx = true;
     ImGui::SameLine();
     ImGui::BeginDisabled(a.docs.size() < 2);
@@ -1420,12 +1552,12 @@ static void drawUI(App& a)
         float mainW = avail.x - panelW;
         if (d->hasVideo)
         {
-            // 映像 + 波形の縦分割(波形は下段固定高さ)
-            float wvH = std::min(170.0f, waveH * 0.45f);
+            // 映像 + (任意で)波形。波形はデフォルト非表示(ツールバーの「波形」でON)
+            float wvH = a.showVideoWave ? std::min(170.0f, waveH * 0.45f) : 0.0f;
             float videoH = std::max(100.0f, waveH - wvH);
             ImGui::BeginGroup();
             drawVideoPane(a, *d, ImVec2(mainW, videoH));
-            drawWaveform(a, *d, ImVec2(mainW, waveH - videoH));
+            if (wvH > 0) drawWaveform(a, *d, ImVec2(mainW, waveH - videoH));
             ImGui::EndGroup();
         }
         else
