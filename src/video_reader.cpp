@@ -23,7 +23,7 @@ bool VideoReader::start(const std::string& path, double t, int outW, int outH, d
     char ss[32];
     std::snprintf(ss, sizeof(ss), "%.3f", t < 0 ? 0.0 : t);
     char scale[64];
-    std::snprintf(scale, sizeof(scale), "scale=%d:%d", outW, outH);
+    std::snprintf(scale, sizeof(scale), "scale=%d:%d:flags=lanczos", outW, outH);
 
 #ifdef _WIN32
     std::wstring cmd = L"\"" + plat::utf8ToWide(Ffmpeg::findFfmpeg()) + L"\""
