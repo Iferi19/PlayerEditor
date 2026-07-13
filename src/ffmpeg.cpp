@@ -283,19 +283,33 @@ namespace Ffmpeg
             }
         }
 
-        // 映像: width,height,avg_frame_rate (mjpegカバーアート等の attached_pic は除外したいが v1 は許容)
+        // 映像: カバーアート(attached_pic / フレームレート無しの静止画)は映像扱いしない
         std::string vi = runTool(fp, { "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=width,height,avg_frame_rate", "-of", "csv=p=0", input },
+            "-show_entries", "stream=width,height,avg_frame_rate:stream_disposition=attached_pic",
+            "-of", "default=nw=1", input },
             nullptr, false);
         if (!vi.empty())
         {
-            int w = 0, h = 0, num = 0, den = 1;
-            if (std::sscanf(vi.c_str(), "%d,%d,%d/%d", &w, &h, &num, &den) >= 3 && w > 0 && h > 0)
+            auto getVal = [&](const char* key) -> std::string {
+                std::string k = std::string(key) + "=";
+                auto p = vi.find(k);
+                if (p == std::string::npos) return "";
+                p += k.size();
+                auto e = vi.find_first_of("\r\n", p);
+                return vi.substr(p, e == std::string::npos ? std::string::npos : e - p);
+            };
+            int w = std::atoi(getVal("width").c_str());
+            int h = std::atoi(getVal("height").c_str());
+            int num = 0, den = 1;
+            std::sscanf(getVal("avg_frame_rate").c_str(), "%d/%d", &num, &den);
+            bool attachedPic = vi.find("attached_pic=1") != std::string::npos;
+
+            if (w > 0 && h > 0 && !attachedPic && num > 0 && den > 0)
             {
                 si.hasVideo = true;
                 si.width = w;
                 si.height = h;
-                si.fps = (den > 0 && num > 0) ? (double)num / den : 30.0;
+                si.fps = (double)num / den;
                 if (si.fps <= 0 || si.fps > 240) si.fps = 30.0;
             }
         }
