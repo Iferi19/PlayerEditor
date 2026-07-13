@@ -128,6 +128,7 @@ struct App
     double lastMouseMove = 0;     // 自動非表示用
     bool seekWasPlaying = false;  // シークバー操作前の再生状態
     bool videoTrimMode = false;   // フォト風トリム(シークバーにハンドル表示)
+    bool mouseInWindow = true;    // カーソルがウィンドウ内にあるか(離脱で即バーを隠す)
 
     // 書き出し設定
     int exportFmt = 0;              // kFormats のインデックス
@@ -1045,7 +1046,12 @@ static bool addDocNoPlay(App& a, const std::string& path)
             doc->srcW = si.width;
             doc->srcH = si.height;
             doc->vidFps = si.fps;
-            int outW = std::min(1920, si.width);
+            // デコード上限 = モニター解像度(全画面で等倍になるように)。範囲[1280, 3840]。
+            int cap = 1920;
+            if (GLFWmonitor* mon = glfwGetPrimaryMonitor())
+                if (const GLFWvidmode* mode = glfwGetVideoMode(mon))
+                    cap = std::clamp(mode->width, 1280, 3840);
+            int outW = std::min(cap, si.width);
             int outH = (int)((long long)si.height * outW / si.width);
             if (outH < 2) outH = 2;
             doc->vidW = outW - (outW % 2);
@@ -1092,6 +1098,13 @@ static void doOpen(App& a)
     if (!sel.empty()) openFiles(a, sel);
 }
 
+// カーソルがウィンドウを出入りしたら記録(離脱でコントロールバーを即座に隠す)
+static void cursorEnterCallback(GLFWwindow* w, int entered)
+{
+    if (App* a = (App*)glfwGetWindowUserPointer(w))
+        a->mouseInWindow = (entered != 0);
+}
+
 static void dropCallback(GLFWwindow* w, int count, const char** paths)
 {
     App* a = (App*)glfwGetWindowUserPointer(w);
@@ -1103,6 +1116,14 @@ static void dropCallback(GLFWwindow* w, int count, const char** paths)
 
 // ---- 映像: 音声クロック同期 ----
 
+// glGenerateMipmap は GL3.0 のためヘッダに無い。実行時に取得(取れなければmipmap無しで動作)。
+#ifdef _WIN32
+typedef void (__stdcall* PFN_glGenerateMipmap)(unsigned int);
+#else
+typedef void (*PFN_glGenerateMipmap)(unsigned int);
+#endif
+static PFN_glGenerateMipmap g_glGenerateMipmap = nullptr;
+
 static void uploadVideoTexture(Doc& d, const VideoReader::Frame& f)
 {
     if (!d.tex)
@@ -1111,7 +1132,9 @@ static void uploadVideoTexture(Doc& d, const VideoReader::Frame& f)
         glGenTextures(1, &t);
         d.tex = t;
         glBindTexture(GL_TEXTURE_2D, d.tex);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        // 縮小表示はミップマップ+trilinearでエイリアシングを防ぐ(無い環境はbilinear)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                        g_glGenerateMipmap ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -1119,6 +1142,7 @@ static void uploadVideoTexture(Doc& d, const VideoReader::Frame& f)
     glBindTexture(GL_TEXTURE_2D, d.tex);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, d.vidW, d.vidH, 0, GL_RGB, GL_UNSIGNED_BYTE, f.rgb.data());
+    if (g_glGenerateMipmap) g_glGenerateMipmap(GL_TEXTURE_2D);
 }
 
 // 毎フレーム: 音声位置に合わせて映像フレームを進める。シーク/ループは自動で再スポーン。
@@ -1378,7 +1402,8 @@ static void drawVideoPane(App& a, Doc& d, ImVec2 size)
     bool hoverPane = ImGui::IsMouseHoveringRect(p0, p1);
     const float barH = 48.0f;
     bool inBarArea = hoverPane && io.MousePos.y > p1.y - barH;
-    bool showCtl = (hoverPane || a.fullscreen)
+    bool showCtl = a.mouseInWindow
+                && (hoverPane || a.fullscreen)
                 && (now - a.lastMouseMove < 2.5 || ImGui::IsAnyItemActive());
 
     // 全画面でバーが消えている間はマウスカーソルも隠す(YouTube方式)
@@ -1788,6 +1813,9 @@ int main(int argc, char** argv)
     glfwMakeContextCurrent(win);
     glfwSwapInterval(1);
 
+    // ImGui のコールバック連鎖より先に登録(ImGui側が既存コールバックを呼び継ぐ)
+    glfwSetCursorEnterCallback(win, cursorEnterCallback);
+
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
@@ -1805,6 +1833,9 @@ int main(int argc, char** argv)
 
     ImGui_ImplGlfw_InitForOpenGL(win, true);
     ImGui_ImplOpenGL3_Init("#version 130");
+
+    // 映像テクスチャの縮小品質用(取得できない環境ではbilinearにフォールバック)
+    g_glGenerateMipmap = (PFN_glGenerateMipmap)glfwGetProcAddress("glGenerateMipmap");
 
     App app;
     app.window = win;
