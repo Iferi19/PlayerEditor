@@ -1021,7 +1021,7 @@ static bool addDocNoPlay(App& a, const std::string& path)
     doc->name = baseName(path);
     doc->tags = Ffmpeg::readTags(path);   // 入力に埋まっている曲情報を流用(無ければ空)
 
-    // 映像ストリームがあれば映像ペインを有効化(縮小デコードで負荷を抑える)
+    // 映像ストリームがあれば映像ペインを有効化(FHDまでは原寸、それ以上は縮小)
     if (Ffmpeg::available())
     {
         auto si = Ffmpeg::probe(path);
@@ -1031,7 +1031,7 @@ static bool addDocNoPlay(App& a, const std::string& path)
             doc->srcW = si.width;
             doc->srcH = si.height;
             doc->vidFps = si.fps;
-            int outW = std::min(960, si.width);
+            int outW = std::min(1920, si.width);
             int outH = (int)((long long)si.height * outW / si.width);
             if (outH < 2) outH = 2;
             doc->vidW = outW - (outW % 2);
