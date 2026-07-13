@@ -16,6 +16,7 @@
 #include "join.h"
 #include "spectrum.h"
 #include "stereo.h"
+#include "reference.h"
 #include "video_reader.h"
 
 #ifndef GL_CLAMP_TO_EDGE
@@ -121,6 +122,7 @@ struct App
     float stereoWidthPct = 100.0f;   // ステレオ幅(0=モノ,100=原音,200=ワイド)
     int pendingSelect = -1;     // プログラム起因のタブ選択(切替時に停止させない)
     bool showAnalysis = false;  // 解析サイドパネル表示
+    int refGenre = 0;           // 参考モデル(0=なし, 1..=RefModel::genres)
     int monitorIdx = 0;         // モニターシミュレーション(kMonitors)
 
     // 全画面(YouTube方式: ダブルクリック/Fで切替、Escで復帰)
@@ -700,6 +702,24 @@ static void drawAnalysisPanel(App& a, ImVec2 size)
         ImGui::SetCursorPos(ImVec2(10, 8));
         ImGui::BeginGroup();
         ImGui::TextColored(ImVec4(0.62f, 0.82f, 0.98f, 1.0f), "解析");
+
+        // 参考モデル(ジャンル別の目安)。デフォルトなし、控えめに右側へ。
+        ImGui::SameLine(size.x - 20 - 150);
+        ImGui::SetNextItemWidth(150);
+        const auto& refs = RefModel::genres();
+        const char* refCur = a.refGenre == 0 ? "参考: なし"
+                                             : refs[(size_t)(a.refGenre - 1)].name;
+        if (ImGui::BeginCombo("##refg", refCur))
+        {
+            if (ImGui::Selectable("なし", a.refGenre == 0)) a.refGenre = 0;
+            for (int i = 0; i < (int)refs.size(); i++)
+                if (ImGui::Selectable(refs[(size_t)i].name, a.refGenre == i + 1)) a.refGenre = i + 1;
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("ジャンル別のモデルケース(目安)をメーターとスペクトラムに重ねます。\n一般的な傾向のモデルであり、実測統計ではありません。");
+        const RefModel::Genre* ref = a.refGenre > 0 ? &refs[(size_t)(a.refGenre - 1)] : nullptr;
+
         ImGui::Separator();
 
         auto row = [](const char* label, const std::string& value) {
@@ -759,6 +779,12 @@ static void drawAnalysisPanel(App& a, ImVec2 size)
                 ImVec2 q0 = ImGui::GetCursorScreenPos();
                 ImGui::Dummy(ImVec2(bw, 12));
                 dl->AddRectFilled(q0, ImVec2(q0.x + bw, q0.y + 8), IM_COL32(40, 40, 44, 255), 2.0f);
+                if (ref)   // 参考モデルの推奨レンジを薄い帯で
+                {
+                    float rx0 = q0.x + (ref->corrMin + 1.0f) * 0.5f * bw;
+                    float rx1 = q0.x + (ref->corrMax + 1.0f) * 0.5f * bw;
+                    dl->AddRectFilled(ImVec2(rx0, q0.y), ImVec2(rx1, q0.y + 8), IM_COL32(255, 255, 255, 34), 2.0f);
+                }
                 float cxm = q0.x + bw * 0.5f;
                 dl->AddLine(ImVec2(cxm, q0.y), ImVec2(cxm, q0.y + 8), IM_COL32(90, 90, 95, 255));
                 dl->AddText(ImVec2(q0.x - 2, q0.y + 9), IM_COL32(110, 110, 115, 255), "-1");
@@ -782,6 +808,12 @@ static void drawAnalysisPanel(App& a, ImVec2 size)
                 ImVec2 q0 = ImGui::GetCursorScreenPos();
                 ImGui::Dummy(ImVec2(bw, 10));
                 dl->AddRectFilled(q0, ImVec2(q0.x + bw, q0.y + 8), IM_COL32(40, 40, 44, 255), 2.0f);
+                if (ref)   // 参考モデルの推奨レンジ
+                {
+                    float rx0 = q0.x + (ref->widthMin / 200.0f) * bw;
+                    float rx1 = q0.x + (ref->widthMax / 200.0f) * bw;
+                    dl->AddRectFilled(ImVec2(rx0, q0.y), ImVec2(rx1, q0.y + 8), IM_COL32(255, 255, 255, 34), 2.0f);
+                }
                 float fw = (float)std::clamp(rt.widthPct / 200.0, 0.0, 1.0) * bw;
                 dl->AddRectFilled(q0, ImVec2(q0.x + fw, q0.y + 8), IM_COL32(78, 201, 176, 230), 2.0f);
                 float ax = q0.x + (float)std::clamp(d->widthAll / 200.0, 0.0, 1.0) * bw;
@@ -835,6 +867,11 @@ static void drawAnalysisPanel(App& a, ImVec2 size)
         ImGui::TextColored(ImVec4(0.31f, 0.79f, 0.69f, 1.0f), "■現在");
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.30f, 1.0f), "―全体平均");
+        if (ref)
+        {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.87f, 0.9f), "--%s(目安)", ref->name);
+        }
         ImGui::Separator();
         {
             const int   FFTN = 4096;
@@ -907,6 +944,26 @@ static void drawAnalysisPanel(App& a, ImVec2 size)
                     pts[(size_t)i] = ImVec2(sp0.x + (float)i * sw / nPts, sp1.y - norm * sh);
                 }
                 dl->AddPolyline(pts.data(), nPts, IM_COL32(242, 166, 76, 255), 0, 1.5f);
+
+                // 参考モデル: トラック自身の1kHzレベルに合わせて配置した破線(目安)
+                if (ref)
+                {
+                    int i1k = (int)(nPts * std::log(1000.0f / 20.0f) / std::log(1000.0f));
+                    i1k = std::clamp(i1k, 0, nPts - 1);
+                    float offset = avg[(size_t)i1k];   // モデルの0dB(=1kHz)をここへ
+                    for (int i = 0; i + 3 < nPts; i += 6)   // 破線: 3px描いて3px空ける
+                    {
+                        auto py = [&](int idx) {
+                            float hz = 20.0f * std::pow(1000.0f, (float)idx / nPts);
+                            float dbv = offset + RefModel::specAt(*ref, hz);
+                            float nm = std::clamp((dbv - FLOOR) / -FLOOR, 0.0f, 1.0f);
+                            return sp1.y - nm * sh;
+                        };
+                        dl->AddLine(ImVec2(sp0.x + (float)i * sw / nPts, py(i)),
+                                    ImVec2(sp0.x + (float)(i + 3) * sw / nPts, py(i + 3)),
+                                    IM_COL32(220, 220, 225, 150), 1.0f);
+                    }
+                }
             }
             else if (d->specAvgComputing)
             {
