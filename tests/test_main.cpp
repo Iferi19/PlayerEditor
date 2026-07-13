@@ -7,6 +7,7 @@
 #include "join.h"
 #include "spectrum.h"
 #include "biquad.h"
+#include "stereo.h"
 #include "video_reader.h"
 
 #include <chrono>
@@ -473,6 +474,54 @@ int main()
             std::remove(cutOut.c_str());
         }
         else std::printf("[SKIP] video tests (pe_test_video.mp4 not present)\n");
+    }
+
+    // 14) ステレオ計測 (位相相関 / 幅)
+    {
+        // デュアルモノ(testtoneはL=R): 相関+1, 幅0%
+        auto dm = Stereo::measure(clip.samples, clip.channels, 0, clip.frameCount());
+        check("stereo: dual-mono corr=+1", std::fabs(dm.correlation - 1.0) < 0.01,
+              "corr=" + std::to_string(dm.correlation));
+        check("stereo: dual-mono width=0%", dm.widthPct < 1.0,
+              "width=" + std::to_string(dm.widthPct));
+
+        // 逆相 (R=-L): 相関-1, 幅200%
+        int n = 44100;
+        std::vector<float> inv((size_t)n * 2);
+        for (int i = 0; i < n; i++)
+        {
+            float v = 0.5f * (float)std::sin(2 * 3.14159265358979 * 440 * i / 44100.0);
+            inv[(size_t)(i * 2)] = v;
+            inv[(size_t)(i * 2 + 1)] = -v;
+        }
+        auto iv = Stereo::measure(inv, 2, 0, n);
+        check("stereo: inverted corr=-1", std::fabs(iv.correlation - (-1.0)) < 0.01,
+              "corr=" + std::to_string(iv.correlation));
+        check("stereo: inverted width=200%", std::fabs(iv.widthPct - 200.0) < 1.0,
+              "width=" + std::to_string(iv.widthPct));
+
+        // 直交 (L=sin, R=cos): 相関~0, 幅~100%
+        std::vector<float> ort((size_t)n * 2);
+        for (int i = 0; i < n; i++)
+        {
+            double ph = 2 * 3.14159265358979 * 441 * i / 44100.0;   // 441Hz=整数周期
+            ort[(size_t)(i * 2)] = 0.5f * (float)std::sin(ph);
+            ort[(size_t)(i * 2 + 1)] = 0.5f * (float)std::cos(ph);
+        }
+        auto oc = Stereo::measure(ort, 2, 0, n);
+        check("stereo: orthogonal corr~0", std::fabs(oc.correlation) < 0.02,
+              "corr=" + std::to_string(oc.correlation));
+        check("stereo: orthogonal width~100%", std::fabs(oc.widthPct - 100.0) < 2.0,
+              "width=" + std::to_string(oc.widthPct));
+
+        // 解析レポートに載るか
+        Analysis::Data ad;
+        ad.file = "x.wav";
+        ad.phaseCorrelation = dm.correlation;
+        ad.stereoWidthPct = dm.widthPct;
+        std::string j = Analysis::toJson(ad);
+        check("stereo: json has correlation", j.find("\"phase_correlation\": 1.00") != std::string::npos, "");
+        check("stereo: json has width", j.find("\"stereo_width_pct\":") != std::string::npos, "");
     }
 
     std::printf("\n%s\n", g_fail == 0 ? "=> ALL PASS" : ("=> " + std::to_string(g_fail) + " FAILED").c_str());

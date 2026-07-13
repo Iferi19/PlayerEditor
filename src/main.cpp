@@ -15,6 +15,7 @@
 #include "analysis.h"
 #include "join.h"
 #include "spectrum.h"
+#include "stereo.h"
 #include "video_reader.h"
 
 #ifndef GL_CLAMP_TO_EDGE
@@ -85,6 +86,8 @@ struct Doc
     // 解析パネル用キャッシュ(NaN=未計算。加工で無効化)
     double peakCache = NAN;
     double rmsCache = NAN;
+    double corrAll = NAN;    // 曲全体の位相相関
+    double widthAll = NAN;   // 曲全体のステレオ幅(%)
     std::vector<float> specDisp;   // スペクトラム表示の平滑化状態(ピクセル単位)
 
     // 曲全体の平均スペクトラム(バックグラウンド計算)
@@ -585,11 +588,17 @@ static void drawJoinPopup(App& a)
     ImGui::EndPopup();
 }
 
-// 解析パネル/保存で使うキャッシュを確保(ピーク/RMSは全走査なので一度だけ計算)
+// 解析パネル/保存で使うキャッシュを確保(全走査系は一度だけ計算)
 static void ensureAnalysisCache(Doc& d)
 {
     if (std::isnan(d.peakCache)) d.peakCache = d.clip.samplePeakDb();
     if (std::isnan(d.rmsCache)) d.rmsCache = d.clip.rmsDb();
+    if (d.clip.channels >= 2 && std::isnan(d.corrAll))
+    {
+        auto sm = Stereo::measure(d.clip.samples, d.clip.channels, 0, d.clip.frameCount());
+        d.corrAll = sm.correlation;
+        d.widthAll = sm.widthPct;
+    }
 }
 
 static Analysis::Data buildAnalysis(Doc& d)
@@ -603,6 +612,8 @@ static Analysis::Data buildAnalysis(Doc& d)
     ad.frames = d.clip.frameCount();
     ad.samplePeakDbfs = d.peakCache;
     ad.rmsDbfs = d.rmsCache;
+    ad.phaseCorrelation = d.corrAll;
+    ad.stereoWidthPct = d.widthAll;
     if (d.loudValid)
     {
         ad.integratedLufs = d.loud.integratedLufs;
@@ -727,6 +738,95 @@ static void drawAnalysisPanel(App& a, ImVec2 size)
         row("Sample Peak", b);
         std::snprintf(b, sizeof(b), "%.1f dBFS", d->rmsCache);
         row("RMS", b);
+
+        // ---- ステレオ(位相相関 / 幅 / ゴニオメーター) ----
+        if (d->clip.channels >= 2)
+        {
+            ImGui::Dummy(ImVec2(0, 4));
+            ImGui::TextDisabled("ステレオ (再生位置 / 全体)");
+            ImGui::Separator();
+
+            const long long win = 8192;
+            auto rt = Stereo::measure(d->clip.samples, d->clip.channels,
+                                      d->playhead - win / 2, d->playhead + win / 2);
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            float bw = size.x - 20.0f;
+
+            // 位相相関メーター (-1 .. +1)
+            std::snprintf(b, sizeof(b), "%+.2f  (全体 %+.2f)", rt.correlation, d->corrAll);
+            row("位相相関", b);
+            {
+                ImVec2 q0 = ImGui::GetCursorScreenPos();
+                ImGui::Dummy(ImVec2(bw, 12));
+                dl->AddRectFilled(q0, ImVec2(q0.x + bw, q0.y + 8), IM_COL32(40, 40, 44, 255), 2.0f);
+                float cxm = q0.x + bw * 0.5f;
+                dl->AddLine(ImVec2(cxm, q0.y), ImVec2(cxm, q0.y + 8), IM_COL32(90, 90, 95, 255));
+                dl->AddText(ImVec2(q0.x - 2, q0.y + 9), IM_COL32(110, 110, 115, 255), "-1");
+                dl->AddText(ImVec2(q0.x + bw - 14, q0.y + 9), IM_COL32(110, 110, 115, 255), "+1");
+                // マーカー: 正=ティール / 0付近=黄 / 負=赤(位相問題)
+                ImU32 mc = rt.correlation >= 0.2 ? IM_COL32(78, 201, 176, 255)
+                         : rt.correlation >= -0.2 ? IM_COL32(255, 208, 64, 255)
+                                                  : IM_COL32(235, 90, 90, 255);
+                float mx = q0.x + (float)((rt.correlation + 1.0) * 0.5) * bw;
+                dl->AddRectFilled(ImVec2(mx - 3, q0.y - 2), ImVec2(mx + 3, q0.y + 10), mc, 2.0f);
+                // 全体値の細マーカー
+                float ax = q0.x + (float)((d->corrAll + 1.0) * 0.5) * bw;
+                dl->AddLine(ImVec2(ax, q0.y - 2), ImVec2(ax, q0.y + 10), IM_COL32(242, 166, 76, 220), 2.0f);
+                ImGui::Dummy(ImVec2(0, 12));
+            }
+
+            // ステレオ幅 (0 .. 200%)
+            std::snprintf(b, sizeof(b), "%.0f%%  (全体 %.0f%%)", rt.widthPct, d->widthAll);
+            row("ステレオ幅", b);
+            {
+                ImVec2 q0 = ImGui::GetCursorScreenPos();
+                ImGui::Dummy(ImVec2(bw, 10));
+                dl->AddRectFilled(q0, ImVec2(q0.x + bw, q0.y + 8), IM_COL32(40, 40, 44, 255), 2.0f);
+                float fw = (float)std::clamp(rt.widthPct / 200.0, 0.0, 1.0) * bw;
+                dl->AddRectFilled(q0, ImVec2(q0.x + fw, q0.y + 8), IM_COL32(78, 201, 176, 230), 2.0f);
+                float ax = q0.x + (float)std::clamp(d->widthAll / 200.0, 0.0, 1.0) * bw;
+                dl->AddLine(ImVec2(ax, q0.y - 2), ImVec2(ax, q0.y + 10), IM_COL32(242, 166, 76, 220), 2.0f);
+                ImGui::Dummy(ImVec2(0, 4));
+            }
+
+            // ゴニオメーター (リサージュ、45度回転: 縦=Mid 横=Side)
+            {
+                float gs = std::min(bw, 140.0f);
+                ImVec2 g0 = ImGui::GetCursorScreenPos();
+                g0.x += (bw - gs) * 0.5f;   // 中央寄せ
+                ImGui::Dummy(ImVec2(bw, gs + 4));
+                ImVec2 g1(g0.x + gs, g0.y + gs);
+                dl->AddRectFilled(g0, g1, IM_COL32(14, 14, 16, 255), 3.0f);
+                // ガイド: 縦(M)/横(S)軸と±45度(L/R軸)
+                ImVec2 gc(g0.x + gs * 0.5f, g0.y + gs * 0.5f);
+                dl->AddLine(ImVec2(gc.x, g0.y), ImVec2(gc.x, g1.y), IM_COL32(45, 45, 50, 255));
+                dl->AddLine(ImVec2(g0.x, gc.y), ImVec2(g1.x, gc.y), IM_COL32(45, 45, 50, 255));
+                dl->AddLine(g0, g1, IM_COL32(38, 38, 42, 255));
+                dl->AddLine(ImVec2(g0.x, g1.y), ImVec2(g1.x, g0.y), IM_COL32(38, 38, 42, 255));
+                dl->AddText(ImVec2(g0.x + 3, g0.y + 2), IM_COL32(110, 110, 115, 200), "L");
+                dl->AddText(ImVec2(g1.x - 12, g0.y + 2), IM_COL32(110, 110, 115, 200), "R");
+
+                // 点群: 再生位置周辺のサンプルを 45度回転 (x=S, y=M) でプロット
+                const auto& smp = d->clip.samples;
+                int ch = d->clip.channels;
+                long long total = d->clip.frameCount();
+                long long f0 = std::max(0LL, d->playhead - win / 2);
+                long long f1 = std::min(total, d->playhead + win / 2);
+                long long step = std::max(1LL, (f1 - f0) / 1200);
+                float r = gs * 0.48f;
+                for (long long f = f0; f < f1; f += step)
+                {
+                    float L = smp[(size_t)(f * ch)];
+                    float R = smp[(size_t)(f * ch + 1)];
+                    float x = (L - R) * 0.7071f;
+                    float y = (L + R) * 0.7071f;
+                    float px = gc.x + std::clamp(x, -1.0f, 1.0f) * r;
+                    float py = gc.y - std::clamp(y, -1.0f, 1.0f) * r;
+                    dl->AddRectFilled(ImVec2(px, py), ImVec2(px + 1.5f, py + 1.5f),
+                                      IM_COL32(78, 201, 176, 120));
+                }
+            }
+        }
 
         // ---- スペクトラム(連続曲線: 現在位置 + 曲全体平均) ----
         ImGui::Dummy(ImVec2(0, 4));
@@ -855,6 +955,7 @@ static void applyFx(App& a)
     d->pkWidth = -1;        // 波形を再計算
     d->loudValid = false;   // ラウドネスは変わったので測り直し
     d->peakCache = d->rmsCache = NAN;   // 解析パネルのキャッシュも無効化
+    d->corrAll = d->widthAll = NAN;
     d->avgSpecBins.clear();             // 平均スペクトラムも無効化(進行中の結果は世代で破棄)
     d->specAvgGen++;
     d->specAvgComputing = false;
