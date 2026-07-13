@@ -18,6 +18,8 @@ namespace Analysis
         double lraLu = NAN;
         double samplePeakDbfs = NAN;
         double rmsDbfs = NAN;
+        double phaseCorrelation = NAN;   // -1..+1 (モノラルは NaN)
+        double stereoWidthPct = NAN;     // 0..200 (モノラルは NaN)
     };
 
     inline std::string numOrNull(double v, const char* fmt = "%.2f")
@@ -54,6 +56,8 @@ namespace Analysis
         j += "  \"loudness_range_lu\": " + numOrNull(d.lraLu) + ",\n";
         j += "  \"sample_peak_dbfs\": " + numOrNull(d.samplePeakDbfs) + ",\n";
         j += "  \"rms_dbfs\": " + numOrNull(d.rmsDbfs) + ",\n";
+        j += "  \"phase_correlation\": " + numOrNull(d.phaseCorrelation) + ",\n";
+        j += "  \"stereo_width_pct\": " + numOrNull(d.stereoWidthPct, "%.1f") + ",\n";
         j += "  \"gain_to_minus14_lufs_db\": " +
              (std::isnan(d.integratedLufs) ? std::string("null") : numOrNull(-14.0 - d.integratedLufs)) + "\n";
         j += "}\n";
@@ -74,6 +78,8 @@ namespace Analysis
             "Loudness Range  : %s LU\n"
             "Sample Peak     : %s dBFS\n"
             "RMS             : %s dBFS\n"
+            "Phase Corr.     : %s\n"
+            "Stereo Width    : %s %%\n"
             "Gain to -14LUFS : %s dB\n",
             d.file.c_str(), d.durationSec, d.sampleRate, d.channels, d.frames,
             numOrNull(d.integratedLufs, "%.1f").c_str(),
@@ -81,6 +87,8 @@ namespace Analysis
             numOrNull(d.lraLu, "%.1f").c_str(),
             numOrNull(d.samplePeakDbfs, "%.1f").c_str(),
             numOrNull(d.rmsDbfs, "%.1f").c_str(),
+            numOrNull(d.phaseCorrelation, "%+.2f").c_str(),
+            numOrNull(d.stereoWidthPct, "%.0f").c_str(),
             std::isnan(d.integratedLufs) ? "null" : numOrNull(-14.0 - d.integratedLufs, "%+.1f").c_str());
         return b;
     }
