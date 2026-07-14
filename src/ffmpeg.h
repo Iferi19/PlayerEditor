@@ -25,6 +25,9 @@ struct StreamInfo
 {
     bool hasAudio = false;
     int sampleRate = 0, channels = 0;
+    int audioBits = 0;          // PCM系のビット深度(0=非PCM/不明)
+    std::string codecName;      // pcm_s24le / mp3 / aac / flac ...
+    int bitRateKbps = 0;        // 0=不明(主に非PCM用)
     bool hasVideo = false;
     int width = 0, height = 0;
     double fps = 0;

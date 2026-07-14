@@ -83,6 +83,8 @@ struct Doc
     bool measuring = false;
 
     Tags tags;   // 書き出し時に埋め込む曲情報
+    int srcBits = 0;          // ソースのビット深度(0=非PCM/不明)
+    std::string fmtDetail;    // 表示用: "24 bit" / "MP3 320 kbps" 等
 
     // 解析パネル用キャッシュ(NaN=未計算。加工で無効化)
     double peakCache = NAN;
@@ -356,8 +358,8 @@ static const char* kExts[]    = { "wav", "mp3", "m4a", "flac", "ogg", "aif" };
 
 static const char* kSrItems[]  = { "元のまま", "44100 Hz", "48000 Hz", "96000 Hz" };
 static const int   kSrValues[] = { 0, 44100, 48000, 96000 };
-static const char* kBitItems[]  = { "自動", "16 bit", "24 bit", "32 bit (float)" };
-static const int   kBitValues[] = { 0, 16, 24, 32 };
+static const char* kBitItems[]  = { "ソースと同じ", "16 bit", "24 bit", "32 bit (float)" };
+static const int   kBitValues[] = { -1, 16, 24, 32 };   // -1 = ソースのビット深度
 
 // 媒体別プリセット(選択時に下のフィールドへ反映。以降は自由に編集可)
 struct ExportPreset
@@ -421,6 +423,17 @@ static const ExportPreset kPresets[] = {
     { "アーカイブ (FLAC 24bit, 元レート)",          3, false,   0.0f,  0,  2 },
 };
 
+// 既存ファイルなら上書き確認(ネイティブの重複確認は抑止し、日本語で1回だけ聞く)
+static bool confirmOverwrite(const std::string& path)
+{
+    std::ifstream f(path);
+    if (!f.good()) return true;
+    auto r = pfd::message("上書きの確認",
+        baseName(path) + " は既に存在します。上書きしますか？",
+        pfd::choice::yes_no, pfd::icon::warning).result();
+    return r == pfd::button::yes;
+}
+
 static std::string tempWavPath()
 {
     const char* td = std::getenv("TEMP");
@@ -455,8 +468,8 @@ static void doExport(App& a)
         if (ndot != std::string::npos) nm = nm.substr(0, ndot);
 
         auto out = pfd::save_file("映像ごと切り出し", nm + "_cut." + srcExt,
-            { "動画", "*." + srcExt }).result();
-        if (out.empty()) return;
+            { "動画", "*." + srcExt }, pfd::opt::force_overwrite).result();
+        if (out.empty() || !confirmOverwrite(out)) return;
 
         double t0 = s / (double)d->clip.sampleRate;
         double t1 = e / (double)d->clip.sampleRate;
@@ -488,8 +501,9 @@ static void doExport(App& a)
     std::string suggested = nm + sfx + (useSel ? "_trim" : "") + "." + ext;
 
     auto out = pfd::save_file("書き出し", suggested,
-        { std::string(kFormats[a.exportFmt]) + " (*." + ext + ")", std::string("*.") + ext }).result();
-    if (out.empty()) return;
+        { std::string(kFormats[a.exportFmt]) + " (*." + ext + ")", std::string("*.") + ext },
+        pfd::opt::force_overwrite).result();
+    if (out.empty() || !confirmOverwrite(out)) return;
 
     // 一時的に float WAV を作り、ffmpeg で目的形式へエンコード（タグ埋め込み）
     std::string tmp = tempWavPath();
@@ -497,8 +511,10 @@ static void doExport(App& a)
     if (!WavIo::writeFloatWav(tmp, d->clip.samples, d->clip.channels, d->clip.sampleRate, s, e, gain, err))
     { d->loudText = "書き出し失敗: " + err; return; }
 
-    bool ok = Ffmpeg::transcode(tmp, out, ext, d->tags, err,
-                                kSrValues[a.exportSrIdx], kBitValues[a.exportBitIdx]);
+    int bd = kBitValues[a.exportBitIdx];
+    if (bd == -1) bd = (d->srcBits > 0 ? d->srcBits : 24);   // ソースと同じ(非PCMは24)
+    if (bd != 16 && bd != 24 && bd != 32) bd = 24;
+    bool ok = Ffmpeg::transcode(tmp, out, ext, d->tags, err, kSrValues[a.exportSrIdx], bd);
     std::remove(tmp.c_str());
 
     if (ok)
@@ -510,7 +526,7 @@ static void doExport(App& a)
             baseName(out).c_str(), kFormats[a.exportFmt], norm,
             useSel ? " / 選択範囲" : "",
             a.exportSrIdx > 0 ? (std::string(" / ") + kSrItems[a.exportSrIdx]).c_str() : "",
-            a.exportBitIdx > 0 ? (std::string(" / ") + kBitItems[a.exportBitIdx]).c_str() : "");
+            (std::string(" / ") + std::to_string(bd) + "bit").c_str());
         d->loudText = buf;
     }
     else d->loudText = err;
@@ -638,8 +654,8 @@ static void doAnalysis(App& a)
     auto dot = nm.find_last_of('.');
     if (dot != std::string::npos) nm = nm.substr(0, dot);
     auto out = pfd::save_file("解析結果を保存", nm + "_analysis.json",
-        { "JSON", "*.json", "テキスト", "*.txt" }).result();
-    if (out.empty()) return;
+        { "JSON", "*.json", "テキスト", "*.txt" }, pfd::opt::force_overwrite).result();
+    if (out.empty() || !confirmOverwrite(out)) return;
 
     bool asText = out.size() > 4 && out.substr(out.size() - 4) == ".txt";
     std::ofstream f(out, std::ios::binary);
@@ -733,6 +749,7 @@ static void drawAnalysisPanel(App& a, ImVec2 size)
         row("長さ", b);
         std::snprintf(b, sizeof(b), "%d Hz / %dch", d->clip.sampleRate, d->clip.channels);
         row("フォーマット", b);
+        row("ビット/形式", d->fmtDetail.empty() ? "-" : d->fmtDetail);
 
         ImGui::Dummy(ImVec2(0, 4));
         ImGui::TextDisabled("ラウドネス (EBU R128)");
@@ -1127,13 +1144,16 @@ static void drawExportPopup(App& a)
     bool bitApplies = (a.exportFmt == 0 || a.exportFmt == 3 || a.exportFmt == 5);   // WAV/FLAC/AIF
     ImGui::BeginDisabled(!bitApplies);
     ImGui::Combo("ビット深度", &a.exportBitIdx, kBitItems, IM_ARRAYSIZE(kBitItems));
+    if (bitApplies && a.exportBitIdx == 0 && ImGui::IsItemHovered())
+        ImGui::SetTooltip("読み込んだ曲のビット深度（%s）で書き出します。",
+                          d->srcBits > 0 ? (std::to_string(d->srcBits) + "bit").c_str() : "非PCM→24bit");
     ImGui::EndDisabled();
     ImGui::EndDisabled();   // exportVideoCopy
 
     ImGui::SeparatorText("曲情報（タグ）");
     ImGui::InputText("タイトル", &d->tags.title);
     ImGui::InputText("アーティスト", &d->tags.artist);
-    ImGui::InputText("アルバム", &d->tags.album);
+    ImGui::InputText("アルバムタイトル", &d->tags.album);
     ImGui::InputText("アルバムアーティスト", &d->tags.albumArtist);
     ImGui::InputText("ジャンル", &d->tags.genre);
     ImGui::InputText("年", &d->tags.year);
@@ -1184,6 +1204,22 @@ static void togglePlay(App& a)
     else startPlayback(a);
 }
 
+// 再生位置を曲頭(0)へ。再生中なら先頭から再生し直す。
+static void goToStart(App& a)
+{
+    Doc* d = curDoc(a);
+    if (!d) return;
+    bool wasPlaying = a.player.isPlaying();
+    a.player.stop();
+    d->playhead = 0;
+    if (wasPlaying)
+    {
+        applyPlaybackGain(a);
+        a.player.setLoop(a.loop);
+        a.player.play(d->clip, 0, d->clip.frameCount(), 0);
+    }
+}
+
 static bool addDocNoPlay(App& a, const std::string& path)
 {
     AudioClip c;
@@ -1198,10 +1234,29 @@ static bool addDocNoPlay(App& a, const std::string& path)
     doc->name = baseName(path);
     doc->tags = Ffmpeg::readTags(path);   // 入力に埋まっている曲情報を流用(無ければ空)
 
-    // 映像ストリームがあれば映像ペインを有効化(FHDまでは原寸、それ以上は縮小)
+    // ストリーム情報(ビット深度/コーデック/映像)を取得
     if (Ffmpeg::available())
     {
         auto si = Ffmpeg::probe(path);
+
+        // ビット深度・形式の表示文字列
+        doc->srcBits = si.audioBits;
+        if (si.audioBits > 0)
+        {
+            char fb[48];
+            std::snprintf(fb, sizeof(fb), "%d bit", si.audioBits);
+            doc->fmtDetail = fb;
+            if (si.codecName == "flac") doc->fmtDetail += " FLAC";
+        }
+        else if (!si.codecName.empty())
+        {
+            std::string up = si.codecName;
+            for (char& ch2 : up) ch2 = (char)toupper((unsigned char)ch2);
+            doc->fmtDetail = up;
+            if (si.bitRateKbps > 0)
+                doc->fmtDetail += " " + std::to_string(si.bitRateKbps) + " kbps";
+        }
+
         if (si.hasVideo)
         {
             doc->hasVideo = true;
@@ -1686,11 +1741,22 @@ static void drawWaveform(App& a, Doc& d, ImVec2 size)
 
 static void handleShortcuts(App& a)
 {
+    // テキスト入力中 / ポップアップ(書き出し等)表示中はショートカット無効
+    ImGuiIO& io = ImGui::GetIO();
+    bool blocked = io.WantTextInput ||
+                   ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+    if (blocked)
+    {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && a.fullscreen) toggleFullscreen(a);
+        return;
+    }
+
     if (ImGui::IsKeyPressed(ImGuiKey_Space, false)) togglePlay(a);
+    if (ImGui::IsKeyPressed(ImGuiKey_Home, false)) goToStart(a);
 
     // 全画面: F で切替(映像タブのみ)、Esc で解除
     Doc* d = curDoc(a);
-    if (ImGui::IsKeyPressed(ImGuiKey_F, false) && d && d->hasVideo && !ImGui::GetIO().WantTextInput)
+    if (ImGui::IsKeyPressed(ImGuiKey_F, false) && d && d->hasVideo)
         toggleFullscreen(a);
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && a.fullscreen)
         toggleFullscreen(a);
@@ -1768,6 +1834,9 @@ static void drawUI(App& a)
     if (ImGui::Button("開く")) doOpen(a);
     ImGui::SameLine();
     ImGui::BeginDisabled(d == nullptr);
+    if (ImGui::Button("⏮ 先頭")) goToStart(a);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("再生位置を曲頭へ (Home)");
+    ImGui::SameLine();
     const char* playLabel = a.player.isPlaying() ? "⏸ 一時停止" : "▶ 再生";
     if (ImGui::Button(playLabel)) togglePlay(a);
     ImGui::SameLine();
@@ -1892,8 +1961,10 @@ static void drawUI(App& a)
         char vid[64] = "";
         if (d->hasVideo)
             std::snprintf(vid, sizeof(vid), "   |   映像 %dx%d %.3g fps", d->srcW, d->srcH, d->vidFps);
-        std::snprintf(info, sizeof(info), "%s   |   %d Hz / %dch   |   長さ %.2fs   |   位置 %.2fs%s%s%s",
-            d->name.c_str(), d->clip.sampleRate, d->clip.channels, d->clip.duration(), pos, vid, sel, norm);
+        char bit[40] = "";
+        if (!d->fmtDetail.empty()) std::snprintf(bit, sizeof(bit), " / %s", d->fmtDetail.c_str());
+        std::snprintf(info, sizeof(info), "%s   |   %d Hz / %dch%s   |   長さ %.2fs   |   位置 %.2fs%s%s%s",
+            d->name.c_str(), d->clip.sampleRate, d->clip.channels, bit, d->clip.duration(), pos, vid, sel, norm);
         ImGui::TextUnformatted(info);
         if (!d->loudText.empty())
             ImGui::TextColored(ImVec4(0.62f, 0.82f, 0.98f, 1.0f), "%s", d->loudText.c_str());
