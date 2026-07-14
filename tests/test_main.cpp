@@ -501,6 +501,28 @@ int main()
         }
     }
 
+    // 13c) probe: ビット深度/コーデックの取得
+    if (Ffmpeg::available())
+    {
+        auto si = Ffmpeg::probe("D:/temp_Claude/MediaEditor/testtone.wav");
+        check("probe: wav bits=16", si.audioBits == 16, "bits=" + std::to_string(si.audioBits));
+        check("probe: wav codec pcm", si.codecName.rfind("pcm_", 0) == 0, "codec=" + si.codecName);
+
+        // 24bit WAV を作って確認
+        std::string w24 = "D:/PlayerEditor/build/pe_24.wav";
+        std::remove(w24.c_str());
+        std::string e2;
+        WavIo::writeFloatWav(w24, clip.samples, clip.channels, clip.sampleRate, 0, clip.frameCount(), 0.0, e2);
+        // 上は32bit float。ffmpegで24bitに変換して確認
+        std::string w24b = "D:/PlayerEditor/build/pe_24b.wav";
+        std::remove(w24b.c_str());
+        Ffmpeg::transcode(w24, w24b, "wav", Tags{}, e2, 0, 24);
+        auto si24 = Ffmpeg::probe(w24b);
+        check("probe: 24bit wav detected", si24.audioBits == 24, "bits=" + std::to_string(si24.audioBits));
+        std::remove(w24.c_str());
+        std::remove(w24b.c_str());
+    }
+
     // 14) ステレオ計測 (位相相関 / 幅)
     {
         // デュアルモノ(testtoneはL=R): 相関+1, 幅0%

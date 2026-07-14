@@ -268,18 +268,46 @@ namespace Ffmpeg
         const std::string& fp = findFfprobe();
         if (fp.empty()) return si;
 
-        // 音声: sample_rate,channels
+        // 音声: sample_rate,channels + ビット深度/コーデック/ビットレート
         std::string au = runTool(fp, { "-v", "error", "-select_streams", "a:0",
-            "-show_entries", "stream=sample_rate,channels", "-of", "csv=p=0", input },
+            "-show_entries",
+            "stream=sample_rate,channels,bits_per_sample,bits_per_raw_sample,sample_fmt,codec_name,bit_rate",
+            "-of", "default=nw=1", input },
             nullptr, false);
         if (!au.empty())
         {
-            int sr = 0, ch = 0;
-            if (std::sscanf(au.c_str(), "%d,%d", &sr, &ch) == 2 && sr > 0 && ch > 0)
+            auto val = [&](const char* key) -> std::string {
+                std::string k = std::string(key) + "=";
+                auto p = au.find(k);
+                if (p == std::string::npos) return "";
+                p += k.size();
+                auto e = au.find_first_of("\r\n", p);
+                std::string v = au.substr(p, e == std::string::npos ? std::string::npos : e - p);
+                if (v == "N/A") return "";
+                return v;
+            };
+            int sr = std::atoi(val("sample_rate").c_str());
+            int ch = std::atoi(val("channels").c_str());
+            if (sr > 0 && ch > 0)
             {
                 si.hasAudio = true;
                 si.sampleRate = sr;
                 si.channels = ch;
+                si.codecName = val("codec_name");
+                si.bitRateKbps = std::atoi(val("bit_rate").c_str()) / 1000;
+
+                int bps = std::atoi(val("bits_per_sample").c_str());
+                int braw = std::atoi(val("bits_per_raw_sample").c_str());
+                si.audioBits = bps > 0 ? bps : braw;   // PCM系のみ非0
+                // PCMで上記が空なら sample_fmt から推定
+                if (si.audioBits == 0 && si.codecName.rfind("pcm_", 0) == 0)
+                {
+                    std::string sf = val("sample_fmt");
+                    if (sf.rfind("s16", 0) == 0) si.audioBits = 16;
+                    else if (sf.rfind("s32", 0) == 0) si.audioBits = 32;
+                    else if (sf.rfind("s24", 0) == 0) si.audioBits = 24;
+                    else if (sf.rfind("u8", 0) == 0) si.audioBits = 8;
+                }
             }
         }
 
