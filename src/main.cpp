@@ -1233,6 +1233,14 @@ static bool addDocNoPlay(App& a, const std::string& path)
     doc->clip = std::move(c);
     doc->name = baseName(path);
     doc->tags = Ffmpeg::readTags(path);   // 入力に埋まっている曲情報を流用(無ければ空)
+    // タイトルが空ならファイル名(拡張子なし)を初期値に
+    if (doc->tags.title.empty())
+    {
+        std::string t = baseName(path);
+        auto dot = t.find_last_of('.');
+        if (dot != std::string::npos) t = t.substr(0, dot);
+        doc->tags.title = t;
+    }
 
     // ストリーム情報(ビット深度/コーデック/映像)を取得
     if (Ffmpeg::available())
