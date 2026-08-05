@@ -891,7 +891,7 @@ static void drawAnalysisPanel(App& a, ImVec2 size)
         }
         ImGui::Separator();
         {
-            const int   FFTN = 4096;
+            const int   FFTN = 8192;   // 低域の解像度向上(定Qスムージングと併用)
             const float FLOOR = -66.0f;  // 表示下限(dB)
 
             float sw = size.x - 20.0f, sh = 150.0f;

@@ -379,6 +379,16 @@ int main()
             for (int i = 1; i < 200; i++) if (rs[(size_t)i] < rs[(size_t)(i - 1)] - 0.01f) { mono = false; break; }
             check("spec interp: monotonic on ramp", mono, "");
         }
+
+        // 定Qスムージング: 平坦入力は平坦出力(角張り無し)
+        {
+            std::vector<float> flat((size_t)(FFTN / 2), -20.0f);   // 全bin -20dB(=magnitude一定)
+            auto fs = Spec::bandLevelsDb(flat, sr, FFTN, 300, 20.0f, 20000.0f);
+            float mn = 1e9f, mx = -1e9f;
+            for (int i = 5; i < 300; i++) { mn = std::min(mn, fs[(size_t)i]); mx = std::max(mx, fs[(size_t)i]); }
+            check("spec smooth: flat input -> flat output", (mx - mn) < 0.5f,
+                  "spread=" + std::to_string(mx - mn) + " dB");
+        }
     }
 
     // 12) バイクワッドフィルタ(モニターシミュレーション)
