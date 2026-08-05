@@ -96,43 +96,51 @@ namespace Spec
         return out;
     }
 
-    // binスペクトルを対数間隔の帯域にまとめる(帯域内はパワー平均、dBで返す)
-    // nBands を描画ピクセル数にすれば連続曲線用の対数リサンプルとしても使える。
+    // 定Q(フラクショナルオクターブ)スムージングで対数間隔にリサンプル。
+    // 各出力点をその中心周波数に比例した幅(±octaveHalf オクターブ)で平均するため、
+    // 低域の角張り(bin間を直線で結ぶギザギザ)が自然にならされる。プロのアナライザー方式。
+    // nBands=描画ピクセル数にすれば連続曲線になる。
     inline std::vector<float> bandLevelsDb(const std::vector<float>& magsDb, int sampleRate,
-                                           int fftSize, int nBands, float fMin, float fMax)
+                                           int fftSize, int nBands, float fMin, float fMax,
+                                           float octaveHalf = 1.0f / 6.0f)   // 1/6oct半幅=1/3oct全幅
     {
         std::vector<float> out((size_t)nBands, -120.0f);
+        int nb = fftSize / 2;
         float nyquist = sampleRate * 0.5f;
         fMax = std::min(fMax, nyquist);
+        float loMul = std::pow(2.0f, -octaveHalf);
+        float hiMul = std::pow(2.0f, +octaveHalf);
+
         for (int b = 0; b < nBands; b++)
         {
-            float f0 = fMin * std::pow(fMax / fMin, (float)b / nBands);
-            float f1 = fMin * std::pow(fMax / fMin, (float)(b + 1) / nBands);
-            double k0f = (double)f0 * fftSize / sampleRate;
-            double k1f = (double)f1 * fftSize / sampleRate;
+            // 出力点の中心周波数(対数軸で等間隔・各セルの中心)
+            float fc = fMin * std::pow(fMax / fMin, (b + 0.5f) / nBands);
+            double k0 = std::max(1.0, (double)(fc * loMul) * fftSize / sampleRate);
+            double k1 = std::min((double)nb, (double)(fc * hiMul) * fftSize / sampleRate);
 
-            if (k1f - k0f >= 1.5)
+            if (k1 - k0 >= 1.0)
             {
-                // 帯域が複数binを含む: パワー平均
-                int k0 = std::max(1, (int)std::floor(k0f));
-                int k1 = std::max(k0 + 1, (int)std::ceil(k1f));
-                k1 = std::min(k1, fftSize / 2);
-                if (k0 >= k1) continue;
-                double acc = 0.0;
-                for (int k = k0; k < k1; k++)
+                // スムージング窓のパワー平均。bin k は周波数 index=k を中心に [k-0.5,k+0.5] を占める
+                // とみなし、窓の端を fractional重み で加重(fcが動くと値も連続=階段が出ない)。
+                int a = std::max(1, (int)std::floor(k0 + 0.5));
+                int c = std::min(nb - 1, (int)std::ceil(k1 - 0.5));
+                double acc = 0.0, wsum = 0.0;
+                for (int k = a; k <= c; k++)
                 {
-                    double lin = std::pow(10.0, magsDb[(size_t)k] / 20.0);
-                    acc += lin * lin;
+                    double lo = std::max((double)k - 0.5, k0);
+                    double hi = std::min((double)k + 0.5, k1);
+                    double w = hi - lo;   // このbinが窓に占める割合
+                    if (w <= 0.0) continue;
+                    acc += std::pow(10.0, magsDb[(size_t)k] / 10.0) * w;   // パワー×重み
+                    wsum += w;
                 }
-                acc /= (k1 - k0);
-                out[(size_t)b] = (float)(10.0 * std::log10(std::max(acc, 1e-14)));
+                out[(size_t)b] = (float)(10.0 * std::log10(std::max(acc / std::max(wsum, 1e-9), 1e-14)));
             }
             else
             {
-                // 帯域がbinより細かい(低域): 隣接binをパワー領域で線形補間して階段を除去
-                double kc = std::sqrt((double)f0 * f1) * fftSize / sampleRate;   // 帯域中心(幾何平均)
-                int k = (int)kc;
-                k = std::max(1, std::min(k, fftSize / 2 - 2));
+                // 窓がbinより狭い(最低域): 隣接binをパワー領域で線形補間
+                double kc = (double)fc * fftSize / sampleRate;
+                int k = std::max(1, std::min((int)kc, nb - 2));
                 double frac = std::clamp(kc - k, 0.0, 1.0);
                 double p0 = std::pow(10.0, magsDb[(size_t)k] / 10.0);
                 double p1 = std::pow(10.0, magsDb[(size_t)(k + 1)] / 10.0);
