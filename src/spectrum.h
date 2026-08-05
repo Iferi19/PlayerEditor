@@ -102,7 +102,7 @@ namespace Spec
     // nBands=描画ピクセル数にすれば連続曲線になる。
     inline std::vector<float> bandLevelsDb(const std::vector<float>& magsDb, int sampleRate,
                                            int fftSize, int nBands, float fMin, float fMax,
-                                           float octaveHalf = 1.0f / 6.0f)   // 1/6oct半幅=1/3oct全幅
+                                           float octaveHalf = 1.0f / 12.0f)   // 1/12oct半幅=1/6oct全幅(軽め)
     {
         std::vector<float> out((size_t)nBands, -120.0f);
         int nb = fftSize / 2;
